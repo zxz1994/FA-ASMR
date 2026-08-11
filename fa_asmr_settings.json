@@ -1,0 +1,6 @@
+{
+  "dev": "auto",
+  "vram_chunk": "6000",
+  "end_extend": "2",
+  "prune": false
+}

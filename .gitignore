@@ -1,0 +1,31 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# ---- Logs / temp ----
+*.log
+*_log.txt
+*_err.txt
+build_pid.txt
+cli_test_*.txt
+
+# ---- Large weights (distributed separately, not in repo) ----
+models/hub/checkpoints/*.pt
+*.pt.bak
+
+# ---- Packaging / embedded torch (not source) ----
+dist/
+build_run/
+embedded_torch/
+embedded_torch_cuda/
+
+# ---- Editor / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

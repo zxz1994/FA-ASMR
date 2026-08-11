@@ -1,0 +1,14 @@
+# FA-ASMR 底层系统配置（进阶用户手编，非 GUI）
+# 本文件只被读取、从不被 GUI 写回，手编内容不会被 GUI 保存覆盖。
+# 改成需要的值后保存即可（exe 需重启生效）。
+
+{
+  # CPU 推理前向线程数：null=自动取物理核数；核心多但想留资源给其它程序可设较小值，如 4
+  "cpu_threads": null,
+
+  # CPU INT8 动态量化：null=自动(CPU 开/GPU 关)；个别老 CPU 上 INT8 反而慢可设 false
+  "quantize_int8": null,
+
+  # CPU 单块帧数上限：默认 2000。越大越占内存、越小越慢(O(n²)注意力)；仅 CPU 模式生效，GPU 看 vram_chunk
+  "cpu_chunk_cap": 2000
+}

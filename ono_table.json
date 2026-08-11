@@ -1,0 +1,64 @@
+{
+  "shiko": {
+    "detect": "peak_pairs_with_silence",
+    "peak_min_dist_ms": 80,
+    "silence_min_ms": 300,
+    "desc": "每对「尖峰+持续包络」+静音=1组。找成对峰<100ms+间有>300ms静音。"
+  },
+  "kuru": {
+    "detect": "rms_autocorr",
+    "min_period_ms": 400,
+    "max_period_ms": 1800,
+    "desc": "くるくる: 连续振幅起伏，一次起伏=1组。RMS自相关找主周期。"
+  },
+  "kuri": {
+    "detect": "rms_autocorr",
+    "min_period_ms": 400,
+    "max_period_ms": 1800,
+    "desc": "くりくり: 低频持续，振幅包络自相关找周期"
+  },
+  "rero": {
+    "detect": "rms_valley_cut",
+    "valley_threshold": 0.4,
+    "min_group_ms": 300,
+    "desc": "连续湿音。RMS下降到中位0.4倍以下=舌头离开=组边界。"
+  },
+  "sawa": {
+    "detect": "peak_count",
+    "peak_threshold": 2.0,
+    "min_peak_dist_ms": 500,
+    "desc": "极规则孤立峰(间隔~1s)。每峰1组，峰距>500ms去重。"
+  },
+  "suri": {
+    "detect": "peak_count",
+    "peak_threshold": 2.5,
+    "min_peak_dist_ms": 600,
+    "desc": "不规则的擦蹭音。每明显峰1组，高阈值+长峰距保守计数。"
+  },
+  "haa": {
+    "detect": "rms_segment",
+    "rms_high_factor": 1.5,
+    "rms_low_factor": 0.5,
+    "min_high_ms": 300,
+    "desc": "规则间歇：一段高RMS→一段低RMS=1组。高>中位1.5倍持续300ms+，低<中位0.5倍。"
+  },
+  "fu": {
+    "detect": "rms_segment",
+    "rms_high_factor": 1.5,
+    "rms_low_factor": 0.5,
+    "min_high_ms": 300,
+    "desc": "规则间歇：一段高RMS→一段低RMS=1组。高>中位1.5倍持续300ms+，低<中位0.5倍。"
+  },
+  "mofu": {
+    "detect": "peak_count",
+    "peak_threshold": 1.5,
+    "min_peak_dist_ms": 400,
+    "desc": "低频持续包络。每峰1组。"
+  },
+  "n": {
+    "detect": "rms_autocorr",
+    "min_period_ms": 150,
+    "max_period_ms": 1500,
+    "desc": "鼻音持续。自相关找周期。"
+  }
+}

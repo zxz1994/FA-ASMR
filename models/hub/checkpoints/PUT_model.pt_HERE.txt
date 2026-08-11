@@ -1,0 +1,3 @@
+把 MMS_FA 权重 model.pt (~1.26GB) 放到本目录:
+  FA-ASMR-Source/models/hub/checkpoints/model.pt
+该文件不随源码分发, 需自行准备 (FA-Kara / MMS_FA 官方权重)。

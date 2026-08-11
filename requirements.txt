@@ -1,0 +1,28 @@
+# FA-ASMR 核心依赖
+# 安装: pip install -r requirements.txt
+
+# === 对齐引擎 (MMS_FA + LoRA) ===
+torch>=2.0
+torchaudio>=2.0
+peft
+transformers
+numpy
+
+# === 音频处理 ===
+soundfile
+scipy
+
+# === 日文注音 (UniDic + 异读) ===
+fugashi
+sudachipy
+sudachidict_core
+pykakasi
+janome
+jaconv
+yomikata
+
+# === GUI ===
+tkinterdnd2
+
+# === 打包 (可选，exe 构建用) ===
+pyinstaller
