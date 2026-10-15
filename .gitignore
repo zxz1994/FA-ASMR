@@ -24,6 +24,7 @@ _collect_stdlib.py
 _stdlib_imports*.txt
 build_release.py
 upload_releases.py
+upload_all.ps1
 releases_output/
 
 # 音频与对齐输出测试文件

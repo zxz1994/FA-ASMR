@@ -1,5 +1,7 @@
 # 🌸 FA-ASMR V2 (Forced Alignment for Japanese ASMR & Voice Dramas)
 
+[ English ](README_EN.md) | [ 简体中文 ](README.md)
+
 > **专为日语 ASMR / 二次元音声配音打造的高精度物理声学强制对齐（打轴）引擎**
 > 
 > 输入「日文台本 + 人声音频」，一键输出毫秒级精确对齐的同名标准 `.lrc` 歌词/字幕文件。
