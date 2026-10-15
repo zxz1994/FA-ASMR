@@ -1,0 +1,35 @@
+# FA-ASMR 核心运行依赖
+# 安装方式: pip install -r requirements.txt
+
+# === 对齐引擎 (MMS_FA + LoRA) ===
+# 建议 Python 3.10 - 3.12
+torch==2.6.0
+torchaudio==2.6.0
+numpy
+
+# === CTC 解码加速 (align_trellis 必需) ===
+# ConstrainedCTCAligner 的 Viterbi 内核依赖 Numba JIT 加速
+numba
+
+# === 注音模型链路 (yomikata dBert) ===
+yomikata
+transformers
+tokenizers
+huggingface_hub
+safetensors
+scipy
+peft
+
+# === 音频处理 ===
+soundfile
+
+# === 日文注音 (UniDic + 异读) ===
+fugashi
+unidic_lite
+pykakasi
+janome
+jaconv
+
+# === GUI 界面 ===
+tkinterdnd2
+pillow

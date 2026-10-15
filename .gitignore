@@ -1,0 +1,48 @@
+# 字节码与 JIT 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.nbc
+*.nbi
+
+# 运行时日志与临时文件
+logs/
+*.log
+*.tmp
+scratch/
+
+# 环境与构建中间产物
+build/
+dist/
+build_run/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 音频与对齐输出测试文件
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac
+*.opus
+*.wma
+*.npz
+*.npy
+*.lrc
+
+# 基础模型大文件（MMS-FA 权重 ~1.2GB，需单独下载至 models/）
+models/
+embedded_torch/
+embedded_torch_cuda/
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+.DS_Store

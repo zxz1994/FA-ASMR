@@ -1,0 +1,6 @@
+{
+  "dev": "cuda",
+  "vram_chunk": "6000",
+  "end_extend": "1",
+  "ono_gate": true
+}
