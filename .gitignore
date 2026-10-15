@@ -19,6 +19,10 @@ build_run/
 .venv/
 venv/
 env/
+*.spec
+_collect_stdlib.py
+_stdlib_imports*.txt
+build_release.py
 
 # 音频与对齐输出测试文件
 *.wav
