@@ -1569,13 +1569,33 @@ def _run_self_test() -> int:
             traceback.print_exc()
 
     def _deps():
-        import numpy, torch, torchaudio, numba
-        import transformers, tokenizers, huggingface_hub, safetensors
-        import soundfile, fugashi, unidic_lite, pykakasi, janome, jaconv
-        import speach, chirptext, puchikarui, rich
-        from speach.ttlig import RubyFrag, RubyToken
-        from yomikata.dbert import dBert
-        return (f"torch={torch.__version__} transformers={transformers.__version__} "
+        # 只校验模块**可被定位**，不做真实 import。
+        # 原因：yomikata.config 在模块级读 UTF-8 JSON 却未声明 encoding，
+        # 直接 import 会在非 UTF-8 locale 下抛 UnicodeDecodeError ——
+        # 那属于 yomikata 的缺陷，由 fa_asmr_converter 的补丁在生产路径上兜住。
+        # 自检这里若直连 import，等于绕开补丁复现上游缺陷，属误报。
+        # 「注音链路实跑」一项才是对 yomikata 的真实检验。
+        import importlib.util
+
+        broken = []
+        for mod in ("numpy", "torch", "torchaudio", "numba",
+                    "transformers", "tokenizers", "huggingface_hub",
+                    "safetensors", "soundfile", "fugashi", "unidic_lite",
+                    "pykakasi", "janome", "jaconv",
+                    "speach", "chirptext", "puchikarui", "rich", "yomikata",
+                    "sympy", "mpmath"):
+            try:
+                if importlib.util.find_spec(mod) is None:
+                    broken.append(mod)
+            except (ImportError, ValueError):
+                broken.append(mod)
+        if broken:
+            raise RuntimeError("以下模块在打包产物中缺失: " + ", ".join(broken))
+
+        from speach.ttlig import RubyFrag, RubyToken  # noqa: F401
+        import torch, transformers, numba
+        return (f"torch={torch.__version__} "
+                f"transformers={transformers.__version__} "
                 f"numba={numba.__version__}")
 
     def _model_file():
