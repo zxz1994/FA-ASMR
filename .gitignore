@@ -15,14 +15,14 @@ scratch/
 build/
 dist/
 build_run/
+artifacts/
 *.egg-info/
 .venv/
 venv/
 env/
-*.spec
-_collect_stdlib.py
 _stdlib_imports*.txt
 build_release.py
+smart_release_upload.py
 upload_releases.py
 upload_all.ps1
 releases_output/
