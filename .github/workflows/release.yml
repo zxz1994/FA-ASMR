@@ -45,6 +45,20 @@ jobs:
         run: |
           pip install --prefer-binary --no-build-isolation -r requirements.txt
 
+      - name: Ensure 7-Zip Available
+        shell: pwsh
+        run: |
+          $paths = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
+          if ($paths | Where-Object { Test-Path $_ }) {
+            Write-Host "7-Zip already present."
+          } else {
+            Write-Host "Installing 7-Zip via Chocolatey..."
+            choco install 7zip -y --no-progress
+          }
+          $found = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $found) { throw "7-Zip installation failed" }
+          Write-Host "Using 7-Zip: $found"
+
       - name: Build, Inject Model & Package (${{ matrix.variant }})
         run: |
           python build_in_ci.py --variant ${{ matrix.variant }}
