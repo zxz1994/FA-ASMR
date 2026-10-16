@@ -30,6 +30,17 @@
 
 ## 二、快速开始
 
+### 2.0 免安装预编译版（推荐普通用户）
+
+无需安装 Python 与 PyTorch，下载解压即用，已完整内置 1.26 GB 声学模型与 LoRA 适配器：
+
+- **CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.0.0-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
+- **CUDA GPU 版**（N 卡用户，速度极快）：下载全部分卷与 `merge_split_gpu_zip.bat` 至同一文件夹，双击该批处理自动合并解压。
+
+下载地址：[GitHub Releases](https://github.com/zxz1994/FA-ASMR/releases/latest)
+
+> 以下为源码运行方式，适合开发者或需要自行修改代码的用户。
+
 ### 2.1 环境准备
 
 - **Python 版本**：推荐 Python 3.10 ~ 3.12 (64-bit)
@@ -37,11 +48,14 @@
 
 ```bash
 # 1. 克隆本仓库
-git clone https://github.com/your-username/FA-ASMR.git
+git clone https://github.com/zxz1994/FA-ASMR.git
 cd FA-ASMR
 
 # 2. 安装核心依赖
 pip install -r requirements.txt
+
+# 3. 单独安装注音模型（其 setup 会拉入大量无关开发依赖，故不列入 requirements）
+pip install --no-deps yomikata
 ```
 
 > **PyTorch 说明**：

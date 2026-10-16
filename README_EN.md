@@ -33,6 +33,17 @@ FA-ASMR V2 utilizes a **100% pure acoustic forced alignment architecture** (Meta
 
 ## 2. Quick Start
 
+### 2.0 Prebuilt Portable Release (Recommended for End Users)
+
+No Python or PyTorch installation required. Unzip and run — the 1.26 GB acoustic model and LoRA adapter are bundled inside:
+
+- **CPU edition** (works on any PC): download `FA-ASMR-v2.0.0-Windows-CPU.zip`, extract, then double-click `运行FA-ASMR.bat`;
+- **CUDA GPU edition** (fast on NVIDIA GPUs): download all split parts plus `merge_split_gpu_zip.bat` into one folder, then double-click the batch file to merge and extract automatically.
+
+Download: [GitHub Releases](https://github.com/zxz1994/FA-ASMR/releases/latest)
+
+> The section below covers running from source, intended for developers or users who need to modify the code.
+
 ### 2.1 Environment Setup
 
 - **Python**: Recommended Python 3.10 – 3.12 (64-bit)
@@ -45,6 +56,10 @@ cd FA-ASMR
 
 # 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Install the furigana model separately
+#    (its setup pulls in many unrelated dev dependencies, hence excluded from requirements)
+pip install --no-deps yomikata
 ```
 
 > **PyTorch Recommendation**:
