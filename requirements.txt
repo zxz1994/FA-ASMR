@@ -4,15 +4,22 @@
 #   pip install --no-deps yomikata      # 见文末说明，必须单独装
 #   python -m yomikata download         # 首次使用前拉取 dBert 权重（约 423 MB）
 
+# ── 版本策略 ────────────────────────────────────────────────────────────
+# 关键依赖**必须锁版本**：transformers 5.x 改变了懒加载架构，
+# yomikata.dbert 的 `from transformers import AutoModelForTokenClassification`
+# 会抛 "Could not import module ... requirements defined correctly"，
+# 导致注音阶段直接终止。以下版本号取自长期稳定运行的开发环境。
+# ────────────────────────────────────────────────────────────────────────
+
 # === 对齐引擎 (MMS_FA + LoRA) ===
 # 建议 Python 3.10 - 3.12
 torch==2.6.0
 torchaudio==2.6.0
-numpy
+numpy==2.3.5
 
 # === CTC 解码加速 (align_trellis 必需) ===
 # ConstrainedCTCAligner 的 Viterbi 内核依赖 Numba JIT 加速
-numba
+numba==0.65.1
 
 # === 注音模型链路 (yomikata dBert) ===
 # yomikata 本体不在此声明：其 setup.py 声明了 30+ 个依赖，其中大半是
@@ -20,35 +27,37 @@ numba
 # pretty-errors / spacy / sudachidict-full 等），运行时完全不需要，且部分
 # 在 Python 3.12 上没有预编译 wheel、会触发源码编译失败。
 # 正确装法见文件末尾。
-transformers
-tokenizers
-huggingface_hub
-safetensors
-scipy
-peft
+transformers==4.50.3
+tokenizers==0.21.4
+huggingface_hub==0.36.2
+safetensors==0.8.0
+scipy==1.18.0
+peft==0.20.0
 # yomikata 运行时真正 import 的第三方模块（缺一即注音阶段崩）：
 #   speach     -> yomikata.dbert / yomikata.utils 模块级 import
 #   chirptext  -> speach.ttlig 依赖
 #   puchikarui -> speach.sqlite 依赖
 #   pynvml     -> yomikata.utils 模块级 import
 #   rich       -> yomikata.config 模块级 import
-speach
-pynvml
-rich
+speach==0.1a15.post1
+chirptext==0.2a6.post2
+puchikarui==0.1
+pynvml==13.0.1
+rich==14.3.4
 
 # === 音频处理 ===
-soundfile
+soundfile==0.14.0
 
 # === 日文注音 (UniDic + 异读) ===
-fugashi
-unidic_lite
-pykakasi
-janome
-jaconv
+fugashi==1.5.2
+unidic_lite==1.0.8
+pykakasi==2.3.0
+janome==0.5.0
+jaconv==0.5.0
 
 # === GUI 界面 ===
-tkinterdnd2
-pillow
+tkinterdnd2==0.6.2
+pillow==12.3.0
 
 # ─────────────────────────────────────────────────────────────────────────
 # yomikata 安装步骤（务必按此顺序，否则报 ModuleNotFoundError: speach）
@@ -60,5 +69,8 @@ pillow
 #   2) python -m yomikata download
 #      dBert 权重（dbert-artifacts/，约 423 MB）不在 PyPI wheel 内，
 #      必须由该命令单独下载到 site-packages/yomikata/ 下。
+#      注意该 CLI 还需要 plac / requests；若不想多装这两个包，
+#      可直接下载官方 release 的 dbert-artifacts.tar.gz 解包，
+#      详见 build_in_ci.py 的 ensure_dbert_artifacts()。
 #      离线环境可提前下好该目录，直接拷贝到同一位置。
 # ─────────────────────────────────────────────────────────────────────────
