@@ -109,9 +109,17 @@ except Exception as _e:
     print("[spec] 警告: 无法读取 %s（%s）；标准库依赖可能不完整。" % (_std_path, _e))
 
 # 含数据文件 / 原生扩展的第三方包
+#
+# speach 必须列入：yomikata.dbert / yomikata.utils 在**模块级**执行
+#   from speach.ttlig import RubyFrag, RubyToken
+# 且 speach.ttlig 又有 `import chirptext`（chirptext.__init__ 再拉
+# puchikarui），PyInstaller 静态分析看不穿这层间接导入，漏收即报
+#   ModuleNotFoundError: No module named 'speach'
+# 导致注音阶段直接终止（此前云端构建就栽在这里）。
 for _pkg in ('tkinterdnd2', 'pykakasi', 'janome', 'fugashi', 'unidic_lite',
              'yomikata', 'transformers', 'tokenizers', 'huggingface_hub',
-             'safetensors', 'numba', 'llvmlite', 'PIL', '_soundfile_data'):
+             'safetensors', 'numba', 'llvmlite', 'PIL', '_soundfile_data',
+             'speach', 'chirptext', 'puchikarui', 'rich', 'pynvml'):
     _d, _b, _h = collect_all(_pkg)
     datas += _d
     binaries += _b

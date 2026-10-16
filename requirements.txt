@@ -1,5 +1,8 @@
 # FA-ASMR 核心运行依赖
-# 安装方式: pip install -r requirements.txt
+# 安装方式:
+#   pip install -r requirements.txt
+#   pip install --no-deps yomikata      # 见文末说明，必须单独装
+#   python -m yomikata download         # 首次使用前拉取 dBert 权重（约 423 MB）
 
 # === 对齐引擎 (MMS_FA + LoRA) ===
 # 建议 Python 3.10 - 3.12
@@ -12,13 +15,26 @@ numpy
 numba
 
 # === 注音模型链路 (yomikata dBert) ===
-# yomikata 由安装脚本单独安装，避免其 setup.py 拉入无用的冲突开发依赖
+# yomikata 本体不在此声明：其 setup.py 声明了 30+ 个依赖，其中大半是
+# 仅训练/发布用的开发工具（black / flake8 / mlflow / streamlit / build /
+# pretty-errors / spacy / sudachidict-full 等），运行时完全不需要，且部分
+# 在 Python 3.12 上没有预编译 wheel、会触发源码编译失败。
+# 正确装法见文件末尾。
 transformers
 tokenizers
 huggingface_hub
 safetensors
 scipy
 peft
+# yomikata 运行时真正 import 的第三方模块（缺一即注音阶段崩）：
+#   speach     -> yomikata.dbert / yomikata.utils 模块级 import
+#   chirptext  -> speach.ttlig 依赖
+#   puchikarui -> speach.sqlite 依赖
+#   pynvml     -> yomikata.utils 模块级 import
+#   rich       -> yomikata.config 模块级 import
+speach
+pynvml
+rich
 
 # === 音频处理 ===
 soundfile
@@ -33,3 +49,16 @@ jaconv
 # === GUI 界面 ===
 tkinterdnd2
 pillow
+
+# ─────────────────────────────────────────────────────────────────────────
+# yomikata 安装步骤（务必按此顺序，否则报 ModuleNotFoundError: speach）
+#
+#   1) pip install --no-deps yomikata
+#      --no-deps 跳过它的全部声明依赖（含大量开发工具），
+#      上面已手动列出运行时所需要的那几个。
+#
+#   2) python -m yomikata download
+#      dBert 权重（dbert-artifacts/，约 423 MB）不在 PyPI wheel 内，
+#      必须由该命令单独下载到 site-packages/yomikata/ 下。
+#      离线环境可提前下好该目录，直接拷贝到同一位置。
+# ─────────────────────────────────────────────────────────────────────────

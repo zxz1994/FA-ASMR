@@ -43,6 +43,44 @@ def fail(msg):
     print(f"[FAIL] {msg}", flush=True)
     sys.exit(1)
 
+def _site_packages() -> Path:
+    import site
+    for p in site.getsitepackages():
+        if "site-packages" in p:
+            return Path(p)
+    import sysconfig
+    return Path(sysconfig.get_paths()["purelib"])
+
+
+def ensure_dbert_artifacts() -> Path:
+    """确保 yomikata dBert 权重就绪。
+
+    dbert-artifacts/ 约 423 MB，**不在 PyPI wheel 内**（RECORD 中无该目录），
+    官方只提供 `python -m yomikata download` 单独拉取。
+    缺失时 dbert.py 的 load() 会抛异常，注音阶段直接终止。
+    """
+    dest = _site_packages() / "yomikata" / "dbert-artifacts"
+    weight = dest / "pytorch_model.bin"
+
+    if weight.is_file() and weight.stat().st_size > 400_000_000:
+        log(f"dBert 权重已就绪: {dest} ({weight.stat().st_size / 1e6:.1f} MB)")
+        return dest
+
+    log("正在下载 yomikata dBert 权重（约 423 MB）...")
+    t0 = time.time()
+    res = subprocess.run(
+        [sys.executable, "-m", "yomikata", "download"],
+        env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+    )
+    if res.returncode != 0 or not weight.is_file():
+        fail("dBert 权重下载失败。离线构建时请预先把 dbert-artifacts/ "
+             "放入 site-packages/yomikata/ 下。")
+
+    log(f"dBert 权重就绪，耗时 {time.time()-t0:.1f}s，"
+        f"大小 {weight.stat().st_size / 1e6:.1f} MB")
+    return dest
+
+
 def ensure_model():
     model_path = HERE / "models" / "hub" / "checkpoints" / "model.pt"
     if model_path.is_file() and model_path.stat().st_size > 1000000000:
@@ -52,14 +90,39 @@ def ensure_model():
     model_path.parent.mkdir(parents=True, exist_ok=True)
     log(f"正在从 Meta 官方 CDN 下载 MMS-FA model.pt ...")
     t0 = time.time()
-    
-    # 使用 curl 下载支持断点和多连接
+
     res = subprocess.run(["curl.exe", "-L", "-o", str(model_path), MODEL_URL, "--progress-bar"])
     if res.returncode != 0 or not model_path.is_file():
         fail("下载 MMS-FA model.pt 失败！")
-    
+
     log(f"模型下载完成，耗时 {time.time()-t0:.1f}s，大小: {model_path.stat().st_size / 1e6:.1f} MB")
     return model_path
+
+
+def verify_annotator():
+    """构建前实跑一次真实注音链，确保依赖与权重齐全。
+
+    只做启动冒烟测试无法发现注音链缺件（曾漏 speach 却仍能生成 exe），
+    因此这里直接调用生产代码路径。
+    """
+    log("构建前验证注音链路（真实调用 RubyAnnotator）...")
+    code = (
+        "import sys, os;"
+        f"sys.path.insert(0, os.path.join(r'{HERE}', 'furigana'));"
+        f"sys.path.insert(0, r'{HERE}');"
+        "from fa_asmr_converter import RubyAnnotator;"
+        "ann = RubyAnnotator(verbose=False, strip_inline_readings=True);"
+        "out = ann.annotate('\u6c96\u7e04\u306e\u30db\u30c6\u30eb\u3067\u3001"
+        "\u4e8c\u4eba\u304d\u308a\u306e\u591c\u3092\u904e\u3054\u3057\u307e\u3057\u3087\u3046\u306d\u3002');"
+        "print('ANNOTATOR_OK', out[:40])"
+    )
+    res = subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+    )
+    if res.returncode != 0:
+        fail("注音链路验证失败：依赖或 dBert 权重不完整，构建已中止。")
+    log("注音链路验证通过。")
 
 def main(variant: str):
     log(f"==================================================")
@@ -73,13 +136,17 @@ def main(variant: str):
     # 1. 下载或确认模型
     model_src = ensure_model()
 
-    # 2. 提取 embedded_torch 运行时
+    # 2. 确保 dBert 权重就绪，并实跑注音链验证依赖完整
+    ensure_dbert_artifacts()
+    verify_annotator()
+
+    # 3. 提取 embedded_torch 运行时
     subprocess.run([sys.executable, "prepare_embedded_torch.py", "--variant", variant], check=True)
 
-    # 3. 收集标准库清单
+    # 4. 收集标准库清单
     subprocess.run([sys.executable, "_collect_stdlib.py", "--target", emb_src, "--out", stdlib_file], check=True)
 
-    # 4. 生成变体 spec
+    # 5. 生成变体 spec
     spec_tmpl = (HERE / "FA-ASMR.spec").read_text(encoding="utf-8")
     spec_content = (spec_tmpl
                     .replace("@PROJECT_DIR@", str(HERE))

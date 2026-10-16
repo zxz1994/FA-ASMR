@@ -17,8 +17,70 @@ import sys
 import os
 import glob
 import json
+import contextlib
 import unicodedata
 from collections import defaultdict, deque
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# yomikata 源码编码缺陷的运行时兜底补丁
+#
+# 上游 yomikata 0.0.4 有若干 open() 没指定 encoding:
+#   yomikata/config/config.py  读 heteronyms.json
+#   yomikata/utils.py          读写 label_encoder.json 等
+# 这些 JSON 都是 UTF-8。在中文 Windows 上 locale 编码为 cp936，
+# json.load() 会抛 UnicodeDecodeError，导致 dBert 加载失败、注音终止。
+#
+# 本地开发机曾手工改过 site-packages 里的这两个文件，但那是环境级修改，
+# 既不能随源码分发，也不会体现在打包产物里 —— 换台机器就复现崩溃。
+# 因此在应用侧统一打补丁：接管内置 open()，仅对 yomikata 目录下的
+# 文本读写补上 encoding="utf-8"。二进制模式不动。
+# ─────────────────────────────────────────────────────────────────────────
+_YOMIKATA_ENC_PATCHED = False
+
+
+@contextlib.contextmanager
+def _patch_yomikata_encoding():
+    """在 with 块内，把 yomikata 目录下的文本读写默认编码改为 UTF-8。
+
+    全局替换 builtins.open 有性能与影响面代价，故仅覆盖 yomikata 导入与
+    dBert 构造这一段（JSON 读取发生在构造期的 load() 中），退出即还原。
+    嵌套使用时内层复用外层补丁，不做重复替换。
+    """
+    global _YOMIKATA_ENC_PATCHED
+    if _YOMIKATA_ENC_PATCHED:
+        yield
+        return
+
+    import builtins
+
+    _real_open = builtins.open
+
+    def _utf8_open(file, mode="r", buffering=-1, encoding=None,
+                   errors=None, newline=None, closefd=True, opener=None):
+        # 未显式指定编码、且为文本模式时，才介入
+        if encoding is None and "b" not in mode:
+            try:
+                path = os.fspath(file)
+                if isinstance(path, (str, bytes)):
+                    p = path if isinstance(path, str) else path.decode(
+                        "utf-8", "replace")
+                    norm = p.replace("\\", "/")
+                    if ("/yomikata/" in norm
+                            or norm.rstrip("/").endswith("/yomikata")):
+                        encoding = "utf-8"
+            except TypeError:
+                pass
+        return _real_open(file, mode, buffering, encoding,
+                          errors, newline, closefd, opener)
+
+    builtins.open = _utf8_open
+    _YOMIKATA_ENC_PATCHED = True
+    try:
+        yield
+    finally:
+        builtins.open = _real_open
+        _YOMIKATA_ENC_PATCHED = False
 
 
 def _build_radical_map() -> "dict[str, str]":
@@ -521,10 +583,12 @@ class RubyAnnotator:
 
             logging.config.dictConfig = _app_log_dict_config
             try:
-                from yomikata.dbert import dBert
+                # 补丁必须覆盖 dBert() 构造：权重 JSON 是在构造期的 load() 里读的
+                with _patch_yomikata_encoding():
+                    from yomikata.dbert import dBert
+                    self._yomikata = dBert()
             finally:
                 logging.config.dictConfig = original_dict_config
-            self._yomikata = dBert()
         except Exception as e:
             self._yomikata = None
             raise RuntimeError(
