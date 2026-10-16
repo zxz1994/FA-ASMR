@@ -37,11 +37,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel
           pip install pyinstaller
+          pip install --only-binary=:all: numpy scipy scikit-learn
+          pip install --no-deps yomikata
           pip install ${{ matrix.torch_version }} --index-url ${{ matrix.torch_index }}
 
       - name: Install Base Requirements
         run: |
-          pip install --prefer-binary -r requirements.txt
+          pip install --prefer-binary --no-build-isolation -r requirements.txt
 
       - name: Build, Inject Model & Package (${{ matrix.variant }})
         run: |

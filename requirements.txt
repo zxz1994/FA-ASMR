@@ -12,7 +12,7 @@ numpy
 numba
 
 # === 注音模型链路 (yomikata dBert) ===
-yomikata
+# yomikata 由安装脚本单独安装，避免其 setup.py 拉入无用的冲突开发依赖
 transformers
 tokenizers
 huggingface_hub
