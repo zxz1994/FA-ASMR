@@ -1547,7 +1547,117 @@ def build_gui():
     return root
 
 
+def _run_self_test() -> int:
+    """打包产物自检：在真实 frozen 环境里验证核心链路可用。
+
+    存在的意义：exe 能启动 ≠ 功能可用。曾出现过依赖漏打包
+    （yomikata 的 speach 缺失）导致启动正常、一进注音就崩的情况。
+    该入口让 CI 在打包后直接跑真实功能，而不是只做启动冒烟。
+
+    退出码 0 = 全部通过；非 0 = 失败。
+    """
+    import traceback
+
+    reports = []
+
+    def step(name, fn):
+        try:
+            detail = fn()
+            reports.append((True, name, detail or ""))
+        except BaseException as e:
+            reports.append((False, name, f"{type(e).__name__}: {e}"))
+            traceback.print_exc()
+
+    def _deps():
+        import numpy, torch, torchaudio, numba
+        import transformers, tokenizers, huggingface_hub, safetensors
+        import soundfile, fugashi, unidic_lite, pykakasi, janome, jaconv
+        import speach, chirptext, puchikarui, rich
+        from speach.ttlig import RubyFrag, RubyToken
+        from yomikata.dbert import dBert
+        return (f"torch={torch.__version__} transformers={transformers.__version__} "
+                f"numba={numba.__version__}")
+
+    def _model_file():
+        base = os.path.join(EXE_DIR, "models", "hub", "checkpoints", "model.pt")
+        if not os.path.isfile(base):
+            raise FileNotFoundError(f"缺少 MMS-FA 权重: {base}")
+        size = os.path.getsize(base)
+        if size < 1_000_000_000:
+            raise RuntimeError(f"MMS-FA 权重体积异常: {size} 字节")
+        return f"{size / 1e6:.1f} MB"
+
+    def _lora_file():
+        p = os.path.join(EXE_DIR, "lora", "fa_asmr_v9e10.pt")
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"缺少 LoRA 适配器: {p}")
+        return f"{os.path.getsize(p) / 1e6:.1f} MB"
+
+    def _dbert_weights():
+        import yomikata
+        d = os.path.join(os.path.dirname(yomikata.__file__),
+                         "dbert-artifacts", "pytorch_model.bin")
+        if not os.path.isfile(d):
+            raise FileNotFoundError(f"缺少 dBert 权重: {d}")
+        return f"{os.path.getsize(d) / 1e6:.1f} MB"
+
+    def _annotate():
+        import sys as _s
+        _s.path.insert(0, os.path.join(SCRIPT_DIR, "furigana"))
+        from fa_asmr_converter import RubyAnnotator
+        ann = RubyAnnotator(verbose=False, strip_inline_readings=True)
+        out = ann.annotate("こんにちは、今日はいい天気ですね。")
+        if "{" not in out or "|" not in out:
+            raise RuntimeError(f"注音输出格式异常: {out!r}")
+        ann.release_gpu()
+        return out
+
+    def _align_engine():
+        import torch
+        import align
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        return f"align.py 可导入，设备={dev}"
+
+    step("第三方依赖导入", _deps)
+    step("MMS-FA 权重", _model_file)
+    step("LoRA 适配器", _lora_file)
+    step("dBert 权重", _dbert_weights)
+    step("对齐引擎导入", _align_engine)
+    step("注音链路实跑", _annotate)
+
+    print("\n" + "=" * 56)
+    print("  FA-ASMR 自检结果")
+    print("=" * 56)
+    ok = True
+    lines = []
+    for passed, name, detail in reports:
+        lines.append(f"  [{'OK ' if passed else '!!!'}] {name}")
+        if detail:
+            lines.append(f"        {detail}")
+        ok = ok and passed
+    lines.append("=" * 56)
+    lines.append("  结论: " + ("全部通过" if ok else "存在失败项"))
+    lines.append("=" * 56)
+
+    for ln in lines:
+        print(ln)
+
+    # windowed（console=False）冻结模式下 stdout 被绑到 devnull，
+    # CI 读不到上面的输出，因此额外落盘一份供构建脚本检查。
+    try:
+        log_path = os.path.join(EXE_DIR, "FA-ASMR_selftest.log")
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"  (自检日志已写入 {log_path})")
+    except Exception:
+        pass
+
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(_run_self_test())
     app = build_gui()
     app.mainloop()
 

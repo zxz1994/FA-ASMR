@@ -53,3 +53,6 @@ embedded_torch_cuda/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 自检日志
+FA-ASMR_selftest.log

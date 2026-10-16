@@ -238,6 +238,8 @@ start "" "{app_name}.exe"
 
     # 10. 验证测试
     exe_path = final_dir / f"{app_name}.exe"
+
+    # 9.1 启动冒烟（确认 GUI 能拉起，不阻塞）
     log(f"验证可执行程序启动: {exe_path} ...")
     proc = subprocess.Popen([str(exe_path)], cwd=str(final_dir))
     time.sleep(4.0)
@@ -249,9 +251,40 @@ start "" "{app_name}.exe"
         proc.wait(timeout=3)
     except subprocess.TimeoutExpired:
         proc.kill()
-    log(f"[OK] {app_name}.exe 启动验证通过！")
+    log(f"[OK] {app_name}.exe 启动验证通过")
 
-    # 11. 压缩为发布资产
+    # 9.2 功能自检（关键关卡）
+    #
+    # 启动正常 ≠ 功能可用。此前 speach 漏打包时 exe 照样能开，
+    # 直到用户拖入台本才崩在注音阶段。这里直接运行 exe 的 --self-test，
+    # 在真实冻结环境里实跑注音链、核对权重，杜绝"能开不能用"。
+    log("运行打包产物功能自检 (--self-test) ...")
+    log_path = final_dir / "FA-ASMR_selftest.log"
+    if log_path.exists():
+        log_path.unlink()
+
+    r = subprocess.run([str(exe_path), "--self-test"], cwd=str(final_dir),
+                       timeout=1800)
+
+    if log_path.is_file():
+        log("---- 自检日志 ----")
+        for ln in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            print("  " + ln)
+        log("------------------")
+
+    if r.returncode != 0:
+        detail = ""
+        if log_path.is_file():
+            detail = "\n" + log_path.read_text(encoding="utf-8", errors="replace")
+        fail(f"打包产物功能自检失败（退出码 {r.returncode}）。{detail}")
+
+    log(f"[OK] {app_name}.exe 功能自检全部通过")
+
+    # 自检日志属于临时文件，不随包分发
+    if log_path.exists():
+        log_path.unlink()
+
+    # 10. 压缩为发布资产
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     pkg_name = f"FA-ASMR-v2.0.0-Windows-{variant.upper()}"
     log(f"正在进行 7-Zip 压缩: {pkg_name} ...")
