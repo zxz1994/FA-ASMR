@@ -96,6 +96,18 @@ hiddenimports = [
     # 二者体积合计约 5 MB，代价可忽略。
     'dateutil', 'dateutil.parser', 'dateutil.tz',
     'narwhals',
+
+    # ── transformers 4.50 采用 _LazyModule 懒加载，静态分析看不穿 ──
+    # 这些包在 site-packages 中确实存在，但只有在真正 import 对应子模块时
+    # 才会被触发，PyInstaller 的依赖图因此收不到它们。构建机与开发机的
+    # 依赖解析结果略有差异时，就会表现为「本机构建正常、CI 构建缺件」。
+    # 实测 CI 失败报错链：
+    #   transformers.trainer -> integrations.integration_utils
+    #     -> modeling_utils -> No module named 'sympy'
+    # sympy 是 torch==2.6.0 的硬依赖、也是 modeling_utils 的数值后端；
+    # einops / opt_einsum 同属该懒加载链路。
+    'sympy', 'mpmath',
+    'einops', 'opt_einsum',
 ]
 
 # 标准库清单（_collect_stdlib.py 扫描 embedded_torch 启动期导入生成）
