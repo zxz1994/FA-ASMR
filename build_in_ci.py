@@ -5,11 +5,32 @@ import sys
 import shutil
 import subprocess
 import time
-import urllib.request
 from pathlib import Path
 
+# CI 控制台默认编码为 cp1252/cp932，中文日志会抛 UnicodeEncodeError。
+# 必须在任何输出之前把标准流切到 UTF-8，并让子进程继承同一编码。
+os.environ["PYTHONIOENCODING"] = "utf-8"
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 HERE = Path(__file__).resolve().parent
-SEVEN_ZIP = r"C:\Program Files\7-Zip\7z.exe"
+
+def _find_7z() -> str:
+    """定位 7-Zip（GitHub 托管 runner 与本地安装路径不同）。"""
+    for cand in (r"C:\Program Files\7-Zip\7z.exe",
+                 r"C:\Program Files (x86)\7-Zip\7z.exe"):
+        if os.path.isfile(cand):
+            return cand
+    found = shutil.which("7z") or shutil.which("7z.exe")
+    if found:
+        return found
+    print("[FAIL] 未找到 7z.exe，无法压缩产物。", flush=True)
+    sys.exit(1)
+
+SEVEN_ZIP = _find_7z()
 BUILD_ROOT = HERE / "build_run"
 DIST_ROOT = HERE / "dist"
 ARTIFACTS_DIR = HERE / "artifacts"
