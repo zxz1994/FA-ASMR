@@ -57,6 +57,10 @@ def ensure_dbert_artifacts() -> Path:
 
     dbert-artifacts/ 约 423 MB，**不在 PyPI wheel 内**（RECORD 中无该目录），
     官方只提供 `python -m yomikata download` 单独拉取。
+
+    此处刻意不走那个 CLI：它自身还要 plac / requests / tqdm 等一串依赖，
+    在精简依赖的构建环境里会连环报 ModuleNotFoundError。
+    改为直接下载官方 tar.gz 并就地解包，零额外依赖。
     缺失时 dbert.py 的 load() 会抛异常，注音阶段直接终止。
     """
     dest = _site_packages() / "yomikata" / "dbert-artifacts"
@@ -68,13 +72,28 @@ def ensure_dbert_artifacts() -> Path:
 
     log("正在下载 yomikata dBert 权重（约 423 MB）...")
     t0 = time.time()
-    res = subprocess.run(
-        [sys.executable, "-m", "yomikata", "download"],
-        env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+
+    dbert_url = (
+        "https://github.com/passaglia/yomikata/releases/download/"
+        "0.0.1-alpha/dbert-artifacts.tar.gz"
     )
-    if res.returncode != 0 or not weight.is_file():
+    tar_path = dest.parent / "dbert-artifacts.tar.gz"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    res = subprocess.run(["curl.exe", "-L", "--fail", "-o", str(tar_path),
+                          dbert_url, "--progress-bar"])
+    if res.returncode != 0 or not tar_path.is_file():
         fail("dBert 权重下载失败。离线构建时请预先把 dbert-artifacts/ "
              "放入 site-packages/yomikata/ 下。")
+
+    log("正在解包 dBert 权重 ...")
+    import tarfile
+    with tarfile.open(tar_path, "r") as tf:
+        tf.extractall(dest.parent)
+    tar_path.unlink(missing_ok=True)
+
+    if not weight.is_file():
+        fail(f"解包后仍未找到权重文件: {weight}")
 
     log(f"dBert 权重就绪，耗时 {time.time()-t0:.1f}s，"
         f"大小 {weight.stat().st_size / 1e6:.1f} MB")
