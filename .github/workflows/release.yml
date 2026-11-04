@@ -66,8 +66,8 @@ jobs:
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.0.0
-          name: "FA-ASMR V2.0.0 (内置模型·开箱即用版)"
+          tag_name: ${{ github.ref_name }}
+          name: "FA-ASMR ${{ github.ref_name }} (内置模型·开箱即用版)"
           files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
