@@ -7,7 +7,7 @@
 > Input: Japanese script (`.txt`) + Vocal audio (`.wav`, `.mp3`, `.flac`, etc.)  
 > Output: Millisecond-accurate standard `.lrc` and `.srt` subtitle files with precise start/end timestamps.
 
-![FA-ASMR UI Preview](assets/ui_preview.png)
+
 
 ---
 
