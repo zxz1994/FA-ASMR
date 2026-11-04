@@ -1,10 +1,10 @@
 {
   "lang": "zh",
-  "align_mode": "single",
+  "align_mode": "multi_persp",
   "dev": "cuda",
   "vram_chunk": "6000",
   "end_extend": "1.5",
   "ono_gate": true,
-  "multi_order": false,
-  "multi_persp": false
+  "multi_order": true,
+  "multi_persp": true
 }

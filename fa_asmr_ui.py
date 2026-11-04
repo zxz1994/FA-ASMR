@@ -433,6 +433,8 @@ def build_ui(ctx):
     tray_title_lbl.pack(side=tk.LEFT)
     tray_hint_lbl = _label(tray_head, tr("unpaired_tray_hint"), 7, MUTED)
     tray_hint_lbl.pack(side=tk.LEFT, padx=10)
+    tray_assemble_btn = _button(tray_head, "⚡ 智能组装为新任务", lambda: _auto_assemble_from_tray(), compact=True)
+    tray_assemble_btn.pack(side=tk.RIGHT)
     tray_items_container = _frame(tray_frame, "#faf6f7")
     tray_items_container.pack(fill=tk.X, padx=12, pady=(0, 8))
 
@@ -546,11 +548,14 @@ def build_ui(ctx):
         for child in cards_inner.winfo_children():
             child.destroy()
 
-        if not _task_store and not _unpaired_pool:
-            empty_box = tk.Frame(cards_inner, bg=PANEL, pady=40)
-            empty_box.pack(fill=tk.BOTH, expand=True)
-            _label(empty_box, "🌸", 26, PINK).pack(pady=(0, 6))
-            _label(empty_box, "任务列表为空 · 拖入台本与音频即可开启智能初筛", 9, MUTED).pack()
+        if not _task_store:
+            empty_box = tk.Frame(cards_inner, bg=PINK_BG, highlightbackground=BORDER_DASHED,
+                                 highlightthickness=2, padx=20, pady=40, cursor="hand2")
+            empty_box.pack(fill=tk.BOTH, expand=True, padx=4, pady=10)
+            _label(empty_box, "📥", 26, PINK).pack(pady=(0, 4))
+            _label(empty_box, "拖拽素材至此新建任务卡片", 10, TEXT, bold=True).pack()
+            _label(empty_box, "可将上方待分配素材拖至此区域直接创建任务，并继续拖入其余视角素材配对", 8, MUTED).pack(pady=(2, 0))
+            _slot_registry.append({"widget": empty_box, "type": "new_card", "cid": None, "uid": None})
             _update_queue_meta()
             return
 
@@ -770,6 +775,13 @@ def build_ui(ctx):
             card.bind("<Double-1>", _double_open)
             top_row.bind("<Double-1>", _double_open)
 
+        # 队列已有卡片时，在末尾保留轻量新建槽
+        bottom_add_slot = tk.Frame(cards_inner, bg=SURFACE, highlightbackground=BORDER_DASHED,
+                                   highlightthickness=1, padx=12, pady=8, cursor="hand2")
+        bottom_add_slot.pack(fill=tk.X, padx=2, pady=(4, 10))
+        _label(bottom_add_slot, "＋ 拖拽素材至此新建任务卡片", 9, MUTED).pack()
+        _slot_registry.append({"widget": bottom_add_slot, "type": "new_card", "cid": None, "uid": None})
+
         _update_queue_meta()
 
     # ── 拖拽交互手势 ────────────────────────────────────────────────────
@@ -900,7 +912,43 @@ def build_ui(ctx):
             _render_all_cards()
             return
 
-        # 2. 丢入卡片插槽
+        # 2. 丢入新建任务槽位 -> 自动创建新任务卡片并消耗素材
+        if tgt_type == "new_card":
+            nonlocal _card_id_counter
+            _card_id_counter += 1
+            cid = f"card_{_card_id_counter}"
+            is_src_audio = src_type in ("audio", "audio_b")
+            raw_stem = os.path.splitext(os.path.basename(src_file))[0]
+            clean_name = raw_stem
+            if is_src_audio and hasattr(ctx, "_extract_perspective_tag"):
+                base_k, _, _ = ctx._extract_perspective_tag(raw_stem)
+                if base_k:
+                    clean_name = base_k
+
+            _task_store[cid] = {
+                "cid": cid,
+                "iid": cid,
+                "name": clean_name,
+                "script": src_file if not is_src_audio else None,
+                "audio": src_file if is_src_audio else None,
+                "audio_b": None,
+                "status": "pending",
+                "confidence": 100,
+            }
+            if src_cid is not None:
+                src_card = _task_store.get(src_cid)
+                if src_card:
+                    src_card[src_type] = None
+                    if not src_card.get("script") and not src_card.get("audio") and not src_card.get("audio_b"):
+                        _task_store.pop(src_cid, None)
+            else:
+                _unpaired_pool.pop(src_uid, None)
+
+            _render_all_cards()
+            _update_queue_meta()
+            return
+
+        # 3. 丢入卡片插槽
         # 验证文件类型兼容性（台本进台本槽，音频进音频槽）
         is_src_audio = src_type in ("audio", "audio_b")
         is_tgt_audio = tgt_type in ("audio", "audio_b")
@@ -951,12 +999,50 @@ def build_ui(ctx):
         if not files:
             return
         nonlocal _card_id_counter, _uid_counter
-        pairs, unmatched = ctx.auto_pair_files(files, mode=mode_var.get())
+
+        # 1. 汇集已有素材池文件 + 未配满已有卡片文件 + 新拖入的所有文件进行联合匹配
+        pool_files = [item["file"] for item in _unpaired_pool.values()]
+        incomplete_files = []
+        for t in _task_store.values():
+            if not t.get("script") or not t.get("audio") or (mode_var.get() == "multi_persp" and not t.get("audio_b")):
+                if t.get("script"):
+                    incomplete_files.append(t["script"])
+                if t.get("audio"):
+                    incomplete_files.append(t["audio"])
+                if t.get("audio_b"):
+                    incomplete_files.append(t["audio_b"])
+
+        new_files = [os.path.abspath(f) for f in files if f and str(f).strip()]
+        all_candidates = list(dict.fromkeys(pool_files + incomplete_files + new_files))
+
+        pairs, unmatched = ctx.auto_pair_files(all_candidates, mode=mode_var.get())
         added = 0
 
         existing_auds = {p.get("audio") for p in _task_store.values()} | {p.get("audio_b") for p in _task_store.values()}
         existing_txts = {p.get("script") for p in _task_store.values()}
 
+        # 2. 检查是否有卡片缺少 audio_b，若本次配对找出了副视角音频，自动补全已有卡片
+        if mode_var.get() == "multi_persp":
+            for pair in list(pairs):
+                # 寻找台本相同且目前缺少 audio_b 的已有任务卡片
+                matched_exist = None
+                for cid, task in _task_store.items():
+                    if task.get("script") == pair.get("script"):
+                        matched_exist = task
+                        break
+                if matched_exist:
+                    # 补齐 audio 或 audio_b
+                    if not matched_exist.get("audio") and pair.get("audio"):
+                        matched_exist["audio"] = pair["audio"]
+                        existing_auds.add(pair["audio"])
+                        added += 1
+                    if not matched_exist.get("audio_b") and pair.get("audio_b"):
+                        matched_exist["audio_b"] = pair["audio_b"]
+                        existing_auds.add(pair["audio_b"])
+                        added += 1
+                    pairs.remove(pair)
+
+        # 3. 录入全新配对成功的任务卡片
         for pair in pairs:
             if pair.get("audio") in existing_auds and pair.get("script") in existing_txts:
                 continue
@@ -980,6 +1066,8 @@ def build_ui(ctx):
                 existing_txts.add(pair["script"])
             added += 1
 
+        # 4. 重新同步未配对素材池：清空旧池，只保留本次仍未配对的文件
+        _unpaired_pool.clear()
         for item in unmatched:
             f_path = item["file"]
             is_txt = item["type"] == "缺音频"
@@ -993,13 +1081,18 @@ def build_ui(ctx):
                 "file": f_path,
                 "name": item["name"],
             }
-            added += 1
 
         _render_all_cards()
         if added:
             update_status(tr("status_added_files", added=added, total=len(_task_store)))
         else:
             update_status(tr("status_files_already"))
+
+    def _auto_assemble_from_tray():
+        if not _unpaired_pool:
+            return
+        files = [item["file"] for item in list(_unpaired_pool.values())]
+        _add_files_to_list(files)
 
     def _browse_files(_event=None):
         files = filedialog.askopenfilenames(

@@ -1254,12 +1254,30 @@ _PERSP_PATTERNS = [
 
 
 def _extract_perspective_tag(stem):
-    """从音频文件名中识别是否带有视角 A / B 标记。返回 (base_key, side_tag, desc)
+    """从音频文件名中识别是否带有视角 A / B 或日文「視点」标记。返回 (base_key, side_tag, desc)
 
     例如: '15A_超绝差距_龟男' -> ('15', 'A', '超绝差距_龟男')
           'Lesson_1_A'        -> ('Lesson_1', 'A', '')
-          '01_辣妹'           -> ('01', None, '辣妹')
+          'トラック7_行ってきますのＮＴＲキス‗主人公視点' -> ('トラック7_行ってきますのNTRキス', '主人公', '')
+          'トラック7_行ってきますのＮＴＲキス‗夫視点'   -> ('トラック7_行ってきますのNTRキス', '夫', '')
     """
+    import unicodedata
+    # 先处理 DLsite 等常用的 Unicode 特殊连接符（双下划线 U+2017、全角下划线 U+FF3F），避免 normalize 丢失连接
+    s = stem.replace("\u2017", "_").replace("\uff3f", "_")
+    s = unicodedata.normalize("NFKC", s)
+
+    # 1. 匹配常见的日文视点后缀（贪婪匹配 base，提取最后一个连接符后面的视点名）
+    m_persp = re.match(r"^(.*)[\-_\s]+(.*?)(?:視点|视点|视角)(?:[_\s]*(?:集中)?Ver)?$", s, re.IGNORECASE)
+    if m_persp:
+        base = m_persp.group(1).strip(" \t\r\n_")
+        tag = m_persp.group(2).strip(" \t\r\n_")
+        return base, tag or "persp", "perspective"
+
+    # 2. 匹配英文字母 A/B/1/2
+    m2 = re.match(r"^(.*)[\-_\s]+(?:perspective|cam|视角)?([ABab12])(?:[_\-\s](.*))?$", s, re.IGNORECASE)
+    if m2:
+        return m2.group(1).strip(" \t\r\n_"), m2.group(2).upper(), m2.group(3) or ""
+
     for pat in _PERSP_PATTERNS:
         m = pat.match(stem)
         if m:
@@ -1277,8 +1295,12 @@ def _extract_perspective_tag(stem):
 def _clean_stem_for_matching(name: str) -> str:
     """字符与修饰词归一化，用于跨格式模糊比对。"""
     import unicodedata
-    s = unicodedata.normalize("NFKC", name).strip().lower()
+    s = name.replace("\u2017", "_").replace("\uff3f", "_")
+    s = unicodedata.normalize("NFKC", s).strip().lower()
     s = re.sub(r"[\(\[\{【〖（].*?[\)\]\}】〗）]", "", s)
+    # 清洗掉视点后缀
+    s = re.sub(r"[_\-\s\.]+(?:主人公|夫|彼|彼女|男|女|私|僕|俺)?(?:視点|视点|视角)(?:[_\s]*(?:集中)?ver)?$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"[_\-\s\.]+(?:perspective|cam)?[_\-\s]*[ab12]$", "", s, flags=re.IGNORECASE)
     s = re.sub(r"[_\-\s\.]+(台本|script|raw|clean|正文|字幕|text)$", "", s)
     s = re.sub(r"[_\-\s\.]+(master|audio|vocal|48k|16bit)$", "", s)
     s = re.sub(r"\b0+(\d+)\b", r"\1", s)
@@ -1308,11 +1330,7 @@ def auto_pair_files(file_paths, mode="single"):
         for aud in audio_files:
             stem = os.path.splitext(os.path.basename(aud))[0]
             base, side, desc = _extract_perspective_tag(stem)
-            aud_by_base.setdefault(base, {})
-            if side not in aud_by_base[base]:
-                aud_by_base[base][side] = aud
-            else:
-                aud_by_base[base].setdefault("extra", []).append(aud)
+            aud_by_base.setdefault(base, []).append((aud, side, stem))
 
         txt_by_base = {}
         for txt in txt_files:
@@ -1324,21 +1342,35 @@ def auto_pair_files(file_paths, mode="single"):
 
         all_bases = sorted(set(aud_by_base.keys()) | set(txt_by_base.keys()))
         for base in all_bases:
-            auds = aud_by_base.get(base, {})
+            aud_list = aud_by_base.get(base, [])
             txts = txt_by_base.get(base, [])
-            aud_a = auds.get("A")
-            aud_b = auds.get("B")
-            if not aud_a and not aud_b and None in auds:
-                aud_a = auds[None]
-
             script_file = txts[0] if txts else None
 
-            if script_file and (aud_a or aud_b):
+            if script_file and aud_list:
+                aud_a, aud_b = None, None
+                sides = {item[1]: item[0] for item in aud_list if item[1]}
+                if "A" in sides and "B" in sides:
+                    aud_a, aud_b = sides["A"], sides["B"]
+                elif "1" in sides and "2" in sides:
+                    aud_a, aud_b = sides["1"], sides["2"]
+                elif len(aud_list) >= 2:
+                    p1_kw = ("主人公", "主角", "男", "彼", "第一", "1", "a")
+                    first_idx = 0
+                    for idx, (aud_f, side_tag, _) in enumerate(aud_list):
+                        if side_tag and any(k in str(side_tag).lower() for k in p1_kw):
+                            first_idx = idx
+                            break
+                    aud_a = aud_list[first_idx][0]
+                    other_auds = [aud_list[i][0] for i in range(len(aud_list)) if i != first_idx]
+                    aud_b = other_auds[0] if other_auds else None
+                elif len(aud_list) == 1:
+                    aud_a = aud_list[0][0]
+
                 pairs.append({
-                    "name": base,
+                    "name": os.path.splitext(os.path.basename(script_file))[0],
                     "script": script_file,
-                    "audio": aud_a or aud_b,
-                    "audio_b": aud_b if aud_a else None,
+                    "audio": aud_a,
+                    "audio_b": aud_b,
                     "confidence": 100,
                     "speaker_marks": [],
                 })
@@ -1348,31 +1380,36 @@ def auto_pair_files(file_paths, mode="single"):
         rem_auds = [a for a in audio_files if a not in paired_auds]
         rem_txts = [t for t in txt_files if t not in paired_txts]
 
-        # 对剩余未配对项尝试模糊匹配
+        # 对剩余未配对项尝试双视角模糊匹配
         if rem_txts and rem_auds:
             for txt in list(rem_txts):
                 t_stem = os.path.splitext(os.path.basename(txt))[0]
                 t_clean = _clean_stem_for_matching(t_stem)
-                best_aud = None
-                best_score = 0.0
+                scores = []
                 for aud in rem_auds:
                     a_stem = os.path.splitext(os.path.basename(aud))[0]
                     a_clean = _clean_stem_for_matching(a_stem)
                     score = difflib.SequenceMatcher(None, t_clean, a_clean).ratio()
-                    if score > best_score:
-                        best_score = score
-                        best_aud = aud
-                if best_aud and best_score >= 0.45:
+                    scores.append((score, aud))
+                scores.sort(key=lambda x: x[0], reverse=True)
+                if scores and scores[0][0] >= 0.40:
+                    best_aud = scores[0][1]
+                    best_score = scores[0][0]
+                    second_aud = None
+                    if len(scores) >= 2 and scores[1][0] >= 0.40:
+                        second_aud = scores[1][1]
                     pairs.append({
                         "name": t_stem,
                         "script": txt,
                         "audio": best_aud,
-                        "audio_b": None,
+                        "audio_b": second_aud,
                         "confidence": int(best_score * 100),
                         "speaker_marks": [],
                     })
                     rem_txts.remove(txt)
                     rem_auds.remove(best_aud)
+                    if second_aud:
+                        rem_auds.remove(second_aud)
 
         for aud in rem_auds:
             unmatched.append({"type": "缺台本", "file": aud, "name": os.path.splitext(os.path.basename(aud))[0]})
