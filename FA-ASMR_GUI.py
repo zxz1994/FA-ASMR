@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""FA-ASMR V2 批量强制对齐工具 (ASMR · 二次元美化版)
+"""FA-ASMR V2 批量强制对齐工具 · 夜樱亮色工作台
 - 拖放/选择多组台本+音频文件，自动按文件名配对
 - 自动台本注音 → MMS-FA + E30 LoRA 双声道 Better-Ear 全局对齐 → 标准 LRC/SRT 输出
 - 可选 Whisper ASR 音素映射与冻结 E30 V4 守门重解码
@@ -245,6 +245,60 @@ class AutoRuby:
         _RUBY_ANNOTATOR = None
 
 
+def read_text_auto_encoding(file_path: str) -> tuple[str, str]:
+    """智能多编码降级嗅探读取台本文本。
+
+    支持格式：
+      - UTF-8（标准及带 BOM utf-8-sig）
+      - Shift-JIS / CP932（DLsite 与日本声优事务所原生台本常用编码）
+      - GB18030 / GBK / GB2312（中文 Windows 常见编码）
+      - UTF-16 LE / BE
+    返回 (解码文本, 识别编码名称)。
+    """
+    with open(file_path, "rb") as f:
+        raw = f.read()
+
+    # 1. 明确的 BOM 探测
+    if raw.startswith(b"\xef\xbb\xbf"):
+        text = raw[3:].decode("utf-8", errors="replace")
+        return (text[1:] if text.startswith("\ufeff") else text), "utf-8-sig"
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        try:
+            text = raw.decode("utf-16")
+            return (text[1:] if text.startswith("\ufeff") else text), "utf-16"
+        except UnicodeDecodeError:
+            pass
+
+    # 2. 严格 UTF-8 校验（覆盖现代大多数台本）
+    try:
+        text = raw.decode("utf-8")
+        return (text[1:] if text.startswith("\ufeff") else text), "utf-8"
+    except UnicodeDecodeError:
+        pass
+
+    # 3. 日文本地编码 CP932 / Shift-JIS（覆盖绝大多数 DLsite 原生日文台本）
+    try:
+        return raw.decode("cp932"), "cp932"
+    except UnicodeDecodeError:
+        pass
+
+    # 4. 中文编码 GB18030（覆盖 GBK / GB2312）
+    try:
+        return raw.decode("gb18030"), "gb18030"
+    except UnicodeDecodeError:
+        pass
+
+    # 5. UTF-16 无 BOM 尝试
+    try:
+        text = raw.decode("utf-16")
+        return (text[1:] if text.startswith("\ufeff") else text), "utf-16"
+    except UnicodeDecodeError:
+        pass
+
+    # 6. 最终兜底：UTF-8 容错替换（防止抛出未捕获异常导致对齐中断）
+    return raw.decode("utf-8", errors="replace"), "utf-8-fallback"
+
+
 def _fmt_lrc_time(t):
     """把 [MM:SS:CC]（align_utils._format_time 产出）转成 [MM:SS.CC]。
 
@@ -265,21 +319,34 @@ def _fmt_lrc_time(t):
     return f"[{m.group(1)}:{m.group(2)}.{m.group(3)}]" if m else None
 
 
+def _lrc_time_to_cs(t):
+    if not t or t == "[error]":
+        return None
+    m = au.LRC_TS_ANCHORED.match(t)
+    if not m:
+        m = re.match(r"\[(\d+):(\d+)[.:](\d+)\]", str(t))
+    if not m:
+        return None
+    return (int(m.group(1)) * 60 + int(m.group(2))) * 100 + int(m.group(3))
+
+
 def build_standard_lrc(result_list):
-    lines = []
-    group_start = None
-    group_end = None
+    groups = []
+    min_start_cs = None
+    min_start_str = None
+    max_end_cs = None
+    max_end_str = None
     # 字幕行按【说话人段】收集：同一行内说话人变化处补该说话人的「②：」前缀。
     # 结构 = [[说话人元组或None, 文本], ...]。无标记作品恒为单段 None，输出不变。
     group_parts = []
 
     def _flush():
-        if group_parts and any(t for _, t in group_parts) and group_start:
-            lines.append(_fmt_line(group_start, group_end, group_parts))
-            if group_end and group_end != group_start:
-                t = _fmt_lrc_time(group_end)
-                if t:
-                    lines.append(t)
+        if group_parts and any(t for _, t in group_parts) and min_start_str:
+            best_end = max_end_str if max_end_str else min_start_str
+            # 若 max_end 比 min_start 还要早（防御极端声学错位），保证 end >= start
+            if max_end_cs is not None and min_start_cs is not None and max_end_cs < min_start_cs:
+                best_end = min_start_str
+            groups.append((min_start_str, best_end, [list(p) for p in group_parts]))
 
     for item in result_list:
         io = item.get("orig", "")
@@ -290,17 +357,29 @@ def build_standard_lrc(result_list):
             io_out = io
         if item.get("type") == 0 and io == "\n":
             _flush()
-            group_start = None
-            group_end = None
+            min_start_cs = None
+            min_start_str = None
+            max_end_cs = None
+            max_end_str = None
             group_parts = []
             continue
         # 被拟声守门删除的 token：不贡献时间边界，也不进入字幕文本
         if item.get(F.ONO_DROPPED):
             continue
-        if "start" in item and group_start is None:
-            group_start = item["start"]
-        if "end" in item:
-            group_end = item["end"]
+        st = item.get("start")
+        if st:
+            cs_s = _lrc_time_to_cs(st)
+            if cs_s is not None:
+                if min_start_cs is None or cs_s < min_start_cs:
+                    min_start_cs = cs_s
+                    min_start_str = st
+        en = item.get("end")
+        if en:
+            cs_e = _lrc_time_to_cs(en)
+            if cs_e is not None:
+                if max_end_cs is None or cs_e > max_end_cs:
+                    max_end_cs = cs_e
+                    max_end_str = en
         # 说话人切换：本 token 带 _spk 且与当前段不同 -> 开新段（行内补前缀）。
         # 无 _spk 的 token 沿用当前段（无标记作品全程如此）。
         _spk = tuple(item[F.SPK]) if item.get(F.SPK) else None
@@ -315,6 +394,30 @@ def build_standard_lrc(result_list):
             group_parts[-1][1] += io_out
 
     _flush()
+
+    lines = []
+    for idx, (g_start, g_end, g_parts) in enumerate(groups):
+        eff_end = g_end
+        if idx + 1 < len(groups):
+            next_start = groups[idx + 1][0]
+            cs_end = _lrc_time_to_cs(eff_end)
+            cs_next = _lrc_time_to_cs(next_start)
+            # 多说话人/多流交错时，若前一句结束晚于后一句起点，将空白结束标记截断至后一句起点，确保全局单调
+            if cs_end is not None and cs_next is not None and cs_end > cs_next:
+                eff_end = next_start
+        lines.append(_fmt_line(g_start, eff_end, g_parts))
+        if eff_end and eff_end != g_start:
+            # 仅当当前行结束与下一行开头存在真实声学停顿（或为全曲末行）时，输出空白下轴时间戳
+            has_gap = True
+            if idx + 1 < len(groups):
+                cs_eff = _lrc_time_to_cs(eff_end)
+                cs_nxt = _lrc_time_to_cs(groups[idx + 1][0])
+                if cs_eff is not None and cs_nxt is not None and cs_eff >= cs_nxt:
+                    has_gap = False
+            if has_gap:
+                t = _fmt_lrc_time(eff_end)
+                if t:
+                    lines.append(t)
     return "\n".join(lines)
 
 
@@ -346,6 +449,12 @@ def _fmt_line(start_str, end_str, text, speakers=None):
     clean = "".join(buf)
     t = _fmt_lrc_time(start_str)
     return f"{t}{clean}" if t else clean
+
+
+def build_standard_srt(result_list, line_end_extend=0.0):
+    """组装标准 SRT 字幕文本（单角色与多角色独立时间流通用）。"""
+    from align_multispeaker import build_standard_srt as _ams_build_srt
+    return _ams_build_srt(result_list, line_end_extend=line_end_extend)
 
 
 # 行首孤立标点剔除：拟声子句被删后，附着其上的后置标点（、。…?！等）
@@ -393,7 +502,7 @@ def _source_norm_map(src, norm):
             m.extend([i] * len(out))
             j += len(out)
             i += 1
-        elif src[i] == norm[j]:
+        elif src[i] == norm[j] or (src[i].isspace() and norm[j].isspace()):
             m.append(i)
             j += 1
             i += 1
@@ -525,8 +634,12 @@ def run_pipeline(
     merge_short_gap=1.5,
     merge_ono_chars=40,
     merge_ono_gap=2.5,
+    enable_multi_order=False,
+    audio_path_b: Optional[str] = None,
 ):
-    """V2 核心对齐管线执行入口 (默认常开静音吸附与拟声守门)"""
+    """V2 核心对齐管线执行入口 (默认常开静音吸附与拟声守门；传入 audio_path_b 时启用多视角联合对齐)"""
+    if audio_path_b:
+        enable_multi_order = True
     def log(msg):
         if log_callback:
             log_callback(msg)
@@ -541,12 +654,22 @@ def run_pipeline(
 
     try:
         log("[1/4] 🌸 读取台本并进行日文注音转换...")
-        with open(script_path, encoding="utf-8") as f:
-            raw_text = f.read()
+        raw_text, detected_enc = read_text_auto_encoding(script_path)
+        if detected_enc not in ("utf-8", "utf-8-sig"):
+            log(f"  ✨ 自动识别并兼容台本编码: {detected_enc.upper()} → UTF-8")
 
         ruby = AutoRuby()
         _ruby = ruby
         lines = raw_text.splitlines()
+
+        if enable_multi_order:
+            try:
+                from align_multispeaker import auto_normalize_speaker_headers
+                lines, _auto_spks = auto_normalize_speaker_headers(lines)
+                if _auto_spks:
+                    log("  ✨ 自动识别独立角色标题: " + " / ".join(f"〖{s}〗" for s in _auto_spks))
+            except Exception as _e:
+                log(f"  ⚠ 独立角色标题识别跳过: {_e}")
 
         # 说话人标记在【注音前】剥离：〖名字〗整段不进入 annotate / tokenize，
         # 因此天然不产生任何发音 token、不进对齐。剥离后记录每个「注音行」的
@@ -687,11 +810,14 @@ def run_pipeline(
 
         alignment_tokens = []
         line_group = []
+        clause_surfaces = []
         # per-token 易错拟声掩码（与 alignment_tokens 同步累积，按子句整体判定）。
         # 供对齐阶段降低这些 token 的发射分权重，削弱不可信的拟声时长对相邻
         # 语义段的挤压。is_easy_ono 需假名原文，故必须在 GUI 侧（有 orig）算。
         ono_clause_flags = []   # 每子句 1 个 flag (1 = 易错拟声子句)
+        clause_speakers = []    # 每子句对应的说话人元组
         _cur_ono_surface = []
+        _cur_clause_spk = ()
         token_to_index_map = {}
         current_line = []
         flat_idx = 0
@@ -708,17 +834,23 @@ def run_pipeline(
                 if current_line:
                     alignment_tokens.append(current_line)
                     line_group.append(src_idx)
+                    clause_speakers.append(_cur_clause_spk)
+                    _surf = "".join(_cur_ono_surface)
+                    clause_surfaces.append(_surf)
                     try:
                         from ono_filter import is_easy_ono as _ieo
-                        _ez = 1 if _ieo("".join(_cur_ono_surface)) else 0
+                        _ez = 1 if _ieo(_surf) else 0
                     except Exception:
                         _ez = 0
                     ono_clause_flags.append(_ez)
                     _cur_ono_surface = []
+                    _cur_clause_spk = ()
                     current_line = []
             if orig == "\n":
                 src_idx += 1
             if pron:
+                if not current_line:
+                    _cur_clause_spk = tuple(item.get(F.SPK, ())) if item.get(F.SPK) else ()
                 current_line.append(pron)
                 _cur_ono_surface.append(orig)
                 token_to_index_map[flat_idx] = i
@@ -726,9 +858,12 @@ def run_pipeline(
         if current_line:
             alignment_tokens.append(current_line)
             line_group.append(src_idx)
+            clause_speakers.append(_cur_clause_spk)
+            _surf = "".join(_cur_ono_surface)
+            clause_surfaces.append(_surf)
             try:
                 from ono_filter import is_easy_ono as _ieo
-                _ez = 1 if _ieo("".join(_cur_ono_surface)) else 0
+                _ez = 1 if _ieo(_surf) else 0
             except Exception:
                 _ez = 0
             ono_clause_flags.append(_ez)
@@ -787,19 +922,68 @@ def run_pipeline(
         blank_punct_mask = [False] * (n_tokens + 1)
 
         _align_diag: Dict[str, Any] = {}
-        alignment_results = align.align_audio_with_text(
-            audio_file_path=audio_path,
-            text_tokens=alignment_tokens,
-            lora_path=lora_path,
-            device=dev,
-            chunk_frames=int(vram_chunk),
-            enable_silence_snap=enable_silence_snap,
-            blank_punct_mask=blank_punct_mask,
-            line_group=line_group,
-            ono_clause_flags=ono_clause_flags,
-            log_callback=log,
-            diagnostics_out=_align_diag,
-        )
+        _stream_clause_lists = [list(range(len(alignment_tokens)))]
+        _mp_meta: Optional[Dict[str, Any]] = None
+        if audio_path_b:
+            from align_multispeaker import (
+                apply_skipped_ono_marks,
+                post_process_and_merge_streams,
+            )
+            from align_multiperspective import (
+                align_multiperspective_joint,
+                project_result_list_to_perspective,
+            )
+            alignment_results, _stream_clause_lists, _mp_meta = align_multiperspective_joint(
+                audio_path_A=audio_path,
+                audio_path_B=audio_path_b,
+                alignment_tokens=alignment_tokens,
+                line_group=line_group,
+                ono_clause_flags=ono_clause_flags,
+                clause_speakers=clause_speakers,
+                lora_path=lora_path,
+                dev=dev,
+                vram_chunk=int(vram_chunk),
+                enable_silence_snap=enable_silence_snap,
+                enable_ono_gate=enable_ono_gate,
+                log_callback=log,
+                clause_surfaces=clause_surfaces,
+            )
+        elif enable_multi_order:
+            from align_multispeaker import (
+                align_multispeaker_or_reordered,
+                apply_skipped_ono_marks,
+                post_process_and_merge_streams,
+            )
+            alignment_results, _stream_clause_lists = align_multispeaker_or_reordered(
+                audio_path=audio_path,
+                alignment_tokens=alignment_tokens,
+                line_group=line_group,
+                ono_clause_flags=ono_clause_flags,
+                clause_speakers=clause_speakers,
+                lora_path=lora_path,
+                dev=dev,
+                vram_chunk=int(vram_chunk),
+                enable_silence_snap=enable_silence_snap,
+                enable_ono_gate=enable_ono_gate,
+                blank_punct_mask=blank_punct_mask,
+                log_callback=log,
+                diagnostics_out=_align_diag,
+                clause_surfaces=clause_surfaces,
+            )
+        else:
+            alignment_results = align.align_audio_with_text(
+                audio_file_path=audio_path,
+                text_tokens=alignment_tokens,
+                lora_path=lora_path,
+                device=dev,
+                chunk_frames=int(vram_chunk),
+                enable_silence_snap=enable_silence_snap,
+                blank_punct_mask=blank_punct_mask,
+                line_group=line_group,
+                ono_clause_flags=ono_clause_flags,
+                log_callback=log,
+                diagnostics_out=_align_diag,
+            )
 
         if not alignment_results:
             if not persist_gpu:
@@ -812,124 +996,226 @@ def run_pipeline(
                 result_list[original_index]["start"] = result["start"]
                 result_list[original_index]["end"] = result["end"]
 
-        # ---- 拟声错位处理 · 阶段一【标记】----------------------------
-        # 跑结构判据给可疑拟声子句打 `_ono_mark`，**一个 token 都不删**。
-        # 数据保持完整，后续 resegment / 短句合并才能切出真实的最终行结构；
-        # 决策放到阶段三、在最终行结构上一次性做（见下方 decide_ono_deletions）。
-        if enable_ono_gate:
-            try:
-                from ono_filter import mark_ono_candidates as _ono_mark
-                _ono_mark(
-                    result_list=result_list,
-                    alignment_results=alignment_results,
-                    token_to_index_map=token_to_index_map,
-                    log_callback=log,
-                )
-            except Exception as _e:
-                log(f"  ⚠ 拟声标记跳过: {_e}")
+        independent_rl = None
+        if enable_multi_order and len(_stream_clause_lists) > 1:
+            result_list, independent_rl = post_process_and_merge_streams(
+                result_list=result_list,
+                alignment_results=alignment_results,
+                token_to_index_map=token_to_index_map,
+                stream_clause_lists=_stream_clause_lists,
+                enable_ono_gate=enable_ono_gate,
+                enable_resegment=enable_resegment,
+                enable_merge_short=enable_merge_short,
+                merge_short_chars=merge_short_chars,
+                merge_short_gap=merge_short_gap,
+                merge_ono_chars=merge_ono_chars,
+                merge_ono_gap=merge_ono_gap,
+                log_callback=log,
+                return_independent_rl=True,
+            )
+        else:
+            if enable_multi_order and enable_ono_gate:
+                try:
+                    apply_skipped_ono_marks(result_list, alignment_results, token_to_index_map)
+                except Exception:
+                    pass
 
-        # ---- 标点驱动重分段（候选=标点，证据=两侧 CTC blank 间隔；标点保留） ----
-        if enable_resegment:
-            try:
-                from resegment import apply_punctuation_resegment as _reseg
-                # 用全量 token 的停顿证据定行边界。此时还没有任何 token 被删
-                # （阶段一只打标记），所以这就是真实的朗读结构。
-                _rl_time = {}
-                for _k, _r in enumerate(alignment_results):
-                    _ri = token_to_index_map.get(_k)
-                    if _ri is not None:
-                        _rl_time[_ri] = (float(_r.get("original_start", 0.0)),
-                                         float(_r.get("original_end", 0.0)))
-                _n_before = sum(1 for _it in result_list if _it.get("orig") == "\n") + 1
-                result_list = _reseg(result_list, _rl_time, frame_sec=0.02, thr_frames=50, max_line_chars=22)
-                _n_after = sum(1 for _it in result_list if _it.get("orig") == "\n") + 1
-                log(f"  ✨ 标点重分段: {_n_before} → {_n_after} 行（标点保留）")
-            except Exception as _e:
-                log(f"  ⚠ 标点重分段跳过: {_e}")
+            # ---- 拟声错位处理 · 阶段一【标记】----------------------------
+            # 跑结构判据给可疑拟声子句打 `_ono_mark`，**一个 token 都不删**。
+            # 数据保持完整，后续 resegment / 短句合并才能切出真实的最终行结构；
+            # 决策放到阶段三、在最终行结构上一次性做（见下方 decide_ono_deletions）。
+            if enable_ono_gate:
+                try:
+                    from ono_filter import mark_ono_candidates as _ono_mark
+                    _ono_mark(
+                        result_list=result_list,
+                        alignment_results=alignment_results,
+                        token_to_index_map=token_to_index_map,
+                        log_callback=log,
+                    )
+                except Exception as _e:
+                    log(f"  ⚠ 拟声标记跳过: {_e}")
 
-        # ---- 短句合并：把 resegment 切碎的相邻短句重新合并 ----
-        # 合并条件：前行可见字符数 <= max_chars 且与下一行起点间隔 <= max_gap。
-        # 不区分台本 \n 与 resegment \n —— 台本按语义断行、朗读却是连读的，
-        # 被行界切开的两半本是同一口气，硬拆会让后半的拟声被判成「行首问题」。
-        if enable_merge_short:
-            try:
-                from merge_short import merge_short_lines as _merge, count_inserted_breaks as _cb
-                _nb = _cb(result_list)
-                result_list = _merge(result_list, max_chars=merge_short_chars,
-                                     max_gap=merge_short_gap,
-                                     ono_max_chars=merge_ono_chars,
-                                     ono_max_gap=merge_ono_gap)
-                _na = _cb(result_list)
-                if _nb != _na:
-                    log(f"  ✨ 短句合并: 合并 {_nb - _na} 处碎句")
-            except Exception as _e:
-                log(f"  ⚠ 短句合并跳过: {_e}")
+            # ---- 标点驱动重分段（候选=标点，证据=两侧 CTC blank 间隔；标点保留） ----
+            if enable_resegment:
+                try:
+                    from resegment import apply_punctuation_resegment as _reseg
+                    # 用全量 token 的停顿证据定行边界。此时还没有任何 token 被删
+                    # （阶段一只打标记），所以这就是真实的朗读结构。
+                    _rl_time = {}
+                    for _k, _r in enumerate(alignment_results):
+                        _ri = token_to_index_map.get(_k)
+                        if _ri is not None:
+                            _rl_time[_ri] = (float(_r.get("original_start", 0.0)),
+                                             float(_r.get("original_end", 0.0)))
+                    _n_before = sum(1 for _it in result_list if _it.get("orig") == "\n") + 1
+                    result_list = _reseg(result_list, _rl_time, frame_sec=0.02, thr_frames=50, max_line_chars=22)
+                    _n_after = sum(1 for _it in result_list if _it.get("orig") == "\n") + 1
+                    log(f"  ✨ 标点重分段: {_n_before} → {_n_after} 行（标点保留）")
+                except Exception as _e:
+                    log(f"  ⚠ 标点重分段跳过: {_e}")
 
-        # ---- 拟声错位处理 · 阶段三【决策】----------------------------
-        # 最终字幕行结构已定，此刻才决定删哪些标记过的拟声，并一次性应用。
-        # 规则见 ono_filter.decide_ono_deletions 的文档。
-        if enable_ono_gate:
-            try:
-                from ono_filter import decide_ono_deletions as _ono_decide
-                _ono_decide(result_list=result_list, log_callback=log)
-            except Exception as _e:
-                log(f"  ⚠ 拟声决策跳过: {_e}")
+            # ---- 短句合并：把 resegment 切碎的相邻短句重新合并 ----
+            # 合并条件：前行可见字符数 <= max_chars 且与下一行起点间隔 <= max_gap。
+            # 不区分台本 \n 与 resegment \n —— 台本按语义断行、朗读却是连读的，
+            # 被行界切开的两半本是同一口气，硬拆会让后半的拟声被判成「行首问题」。
+            if enable_merge_short:
+                try:
+                    from merge_short import merge_short_lines as _merge, count_inserted_breaks as _cb
+                    _nb = _cb(result_list)
+                    result_list = _merge(result_list, max_chars=merge_short_chars,
+                                         max_gap=merge_short_gap,
+                                         ono_max_chars=merge_ono_chars,
+                                         ono_max_gap=merge_ono_gap)
+                    _na = _cb(result_list)
+                    if _nb != _na:
+                        log(f"  ✨ 短句合并: 合并 {_nb - _na} 处碎句")
+                except Exception as _e:
+                    log(f"  ⚠ 短句合并跳过: {_e}")
 
-        for i in range(len(result_list)):
-            item = result_list[i]
-            # 被拟声守门删除的 token：不借时间，保持无时间状态以从 LRC 剔除
-            if item.get(F.ONO_DROPPED):
-                continue
-            if "start" not in item and item.get("type", 0) in [1, 2, 3, 4, 5]:
-                # 行内有界时间借用：绝不越过换行符 \n 跨行偷时间
-                found = False
-                # 1. 优先在当前行内向左寻找前一个有时间的 item
-                for j in range(i - 1, -1, -1):
-                    if result_list[j].get("type") == 0 and result_list[j].get("orig") == "\n":
-                        break
-                    # 不借被删拟声 token 的时间（本就不可靠）
-                    if result_list[j].get(F.ONO_DROPPED):
-                        continue
-                    if "start" in result_list[j]:
-                        item["start"] = result_list[j]["start"]
-                        item["end"] = result_list[j]["end"]
-                        found = True
-                        break
-                # 2. 若左侧已至行首，在当前行内向右寻找第一个有时间的 item
-                if not found:
-                    for j in range(i + 1, len(result_list)):
+            # ---- 拟声错位处理 · 阶段三【决策】----------------------------
+            # 最终字幕行结构已定，此刻才决定删哪些标记过的拟声，并一次性应用。
+            # 规则见 ono_filter.decide_ono_deletions 的文档。
+            if enable_ono_gate:
+                try:
+                    from ono_filter import decide_ono_deletions as _ono_decide
+                    _ono_decide(result_list=result_list, log_callback=log)
+                except Exception as _e:
+                    log(f"  ⚠ 拟声决策跳过: {_e}")
+
+            for i in range(len(result_list)):
+                item = result_list[i]
+                # 被拟声守门删除的 token：不借时间，保持无时间状态以从 LRC 剔除
+                if item.get(F.ONO_DROPPED):
+                    continue
+                if "start" not in item and item.get("type", 0) in [1, 2, 3, 4, 5]:
+                    # 行内有界时间借用：绝不越过换行符 \n 跨行偷时间
+                    found = False
+                    # 1. 优先在当前行内向左寻找前一个有时间的 item
+                    for j in range(i - 1, -1, -1):
                         if result_list[j].get("type") == 0 and result_list[j].get("orig") == "\n":
                             break
+                        # 不借被删拟声 token 的时间（本就不可靠）
                         if result_list[j].get(F.ONO_DROPPED):
                             continue
                         if "start" in result_list[j]:
                             item["start"] = result_list[j]["start"]
                             item["end"] = result_list[j]["end"]
+                            found = True
                             break
+                    # 2. 若左侧已至行首，在当前行内向右寻找第一个有时间的 item
+                    if not found:
+                        for j in range(i + 1, len(result_list)):
+                            if result_list[j].get("type") == 0 and result_list[j].get("orig") == "\n":
+                                break
+                            if result_list[j].get(F.ONO_DROPPED):
+                                continue
+                            if "start" in result_list[j]:
+                                item["start"] = result_list[j]["start"]
+                                item["end"] = result_list[j]["end"]
+                                break
 
         log("[4/4] 📜 组装标准 LRC 与 SRT 字幕...")
-        lrc_content = build_standard_lrc(result_list)
+        target_rl_for_srt = independent_rl if independent_rl is not None else result_list
+        if audio_path_b and _mp_meta is not None:
+            from align_multiperspective import project_result_list_to_perspective
+            _spk_pref = _mp_meta.get("spk_persp_pref")
 
-        if line_end_extend > 0:
-            from lrc_end_extend import extend_lrc
-            lrc_content, _n_ext = extend_lrc(lrc_content, line_end_extend)
-            if _n_ext:
-                log(f"  ✨ 行尾延长 ({line_end_extend:.1f}s): 处理 {_n_ext} 个空白标记")
+            # 1. LRC 视轨生成（水平归并）
+            rl_A = project_result_list_to_perspective(
+                result_list,
+                _mp_meta["u_A_st_sec"],
+                _mp_meta["dur_A_sec"],
+                perspective_side="A",
+                spk_persp_pref=_spk_pref,
+            )
+            rl_B = project_result_list_to_perspective(
+                result_list,
+                _mp_meta["u_B_st_sec"],
+                _mp_meta["dur_B_sec"],
+                perspective_side="B",
+                spk_persp_pref=_spk_pref,
+            )
+            lrc_A = build_standard_lrc(rl_A)
+            lrc_B = build_standard_lrc(rl_B)
+            if line_end_extend > 0:
+                from lrc_end_extend import extend_lrc
+                lrc_A, _ = extend_lrc(lrc_A, line_end_extend)
+                lrc_B, _ = extend_lrc(lrc_B, line_end_extend)
 
-        # 输出字幕与【音频】同名，去掉台本的说话人后缀（原名_{①}{②}.txt -> 原名.lrc）。
-        # 多说话人台本会给文件名加 _{标记} 后缀，若直接沿用会产出 原名_{①}{②}.lrc，
-        # 与音频名不一致，播放器无法自动挂载。
-        _base, _ = _parse_speaker_suffix(os.path.splitext(os.path.basename(script_path))[0])
-        base = _base or os.path.splitext(os.path.basename(script_path))[0]
-        out_dir = os.path.dirname(os.path.abspath(audio_path))
-        lrc_path = os.path.join(out_dir, f"{base}.lrc")
-        with open(lrc_path, "w", encoding="utf-8") as f:
-            f.write(lrc_content)
+            # 2. SRT 视轨生成（多角色完全自治独立流）
+            rl_indep_A = project_result_list_to_perspective(
+                target_rl_for_srt,
+                _mp_meta["u_A_st_sec"],
+                _mp_meta["dur_A_sec"],
+                perspective_side="A",
+                spk_persp_pref=_spk_pref,
+            )
+            rl_indep_B = project_result_list_to_perspective(
+                target_rl_for_srt,
+                _mp_meta["u_B_st_sec"],
+                _mp_meta["dur_B_sec"],
+                perspective_side="B",
+                spk_persp_pref=_spk_pref,
+            )
+            srt_A = build_standard_srt(rl_indep_A, line_end_extend=line_end_extend)
+            srt_B = build_standard_srt(rl_indep_B, line_end_extend=line_end_extend)
 
-        total_elapsed = time.time() - total_start
-        n_lines = lrc_content.count("\n") + 1
-        log(f"\n  💖 对齐完成! 总耗时 {total_elapsed:.1f}s")
-        log(f"  🎯 输出字幕: {lrc_path} ({n_lines} 行)")
+            base_A = os.path.splitext(os.path.basename(audio_path))[0]
+            base_B = os.path.splitext(os.path.basename(audio_path_b))[0]
+            dir_A = os.path.dirname(os.path.abspath(audio_path))
+            dir_B = os.path.dirname(os.path.abspath(audio_path_b))
+            lrc_path = os.path.join(dir_A, f"{base_A}.lrc")
+            lrc_path_b = os.path.join(dir_B, f"{base_B}.lrc")
+            srt_path = os.path.join(dir_A, f"{base_A}.srt")
+            srt_path_b = os.path.join(dir_B, f"{base_B}.srt")
+
+            with open(lrc_path, "w", encoding="utf-8") as f:
+                f.write(lrc_A)
+            with open(lrc_path_b, "w", encoding="utf-8") as f:
+                f.write(lrc_B)
+            with open(srt_path, "w", encoding="utf-8") as f:
+                f.write(srt_A)
+            with open(srt_path_b, "w", encoding="utf-8") as f:
+                f.write(srt_B)
+
+            total_elapsed = time.time() - total_start
+            n_lines_a = lrc_A.count("\n") + 1
+            n_lines_b = lrc_B.count("\n") + 1
+            n_cues_a = srt_A.count(" --> ")
+            n_cues_b = srt_B.count(" --> ")
+            log(f"\n  💖 多视角联合对齐完成! Δt = {_mp_meta['delta_sec']:+.2f}s | 总耗时 {total_elapsed:.1f}s")
+            log(f"  🎯 视角 A: {lrc_path} ({n_lines_a} 行) | {srt_path} ({n_cues_a} 条独立字幕)")
+            log(f"  🎯 视角 B: {lrc_path_b} ({n_lines_b} 行) | {srt_path_b} ({n_cues_b} 条独立字幕)")
+        else:
+            # 1. 组装 LRC 字幕
+            lrc_content = build_standard_lrc(result_list)
+            if line_end_extend > 0:
+                from lrc_end_extend import extend_lrc
+                lrc_content, _n_ext = extend_lrc(lrc_content, line_end_extend)
+                if _n_ext:
+                    log(f"  ✨ LRC 行尾延长 ({line_end_extend:.1f}s): 处理 {_n_ext} 个空白标记")
+
+            # 2. 组装 SRT 字幕（角色完全独立）
+            srt_content = build_standard_srt(target_rl_for_srt, line_end_extend=line_end_extend)
+
+            _base, _ = _parse_speaker_suffix(os.path.splitext(os.path.basename(script_path))[0])
+            base = _base or os.path.splitext(os.path.basename(script_path))[0]
+            out_dir = os.path.dirname(os.path.abspath(audio_path))
+            lrc_path = os.path.join(out_dir, f"{base}.lrc")
+            srt_path = os.path.join(out_dir, f"{base}.srt")
+
+            with open(lrc_path, "w", encoding="utf-8") as f:
+                f.write(lrc_content)
+            with open(srt_path, "w", encoding="utf-8") as f:
+                f.write(srt_content)
+
+            total_elapsed = time.time() - total_start
+            n_lines_lrc = lrc_content.count("\n") + 1
+            n_cues_srt = srt_content.count(" --> ")
+            log(f"\n  💖 对齐完成! 总耗时 {total_elapsed:.1f}s")
+            log(f"  🎯 输出 LRC: {lrc_path} ({n_lines_lrc} 行)")
+            log(f"  🎯 输出 SRT: {srt_path} ({n_cues_srt} 条独立字幕)")
 
         progress_callback and progress_callback(100, "💖 全部完成!")
         if not persist_gpu:
@@ -960,591 +1246,261 @@ def _parse_speaker_suffix(stem):
     return base, [x for x in marks if x]
 
 
-def auto_pair_files(file_paths):
+_PERSP_PATTERNS = [
+    re.compile(r"^(\d+)[_\-\s]*([ABab])(?:[_\s\-\.](.*))?$"),
+    re.compile(r"^(.*?)[_\s\-\.]+(?:perspective|cam|视角)?([ABab])(?:[_\s\-\.](.*))?$", re.IGNORECASE),
+    re.compile(r"^(.*?)[_\s\-\.]+(?:perspective|cam|视角)?([12])$", re.IGNORECASE),
+]
+
+
+def _extract_perspective_tag(stem):
+    """从音频文件名中识别是否带有视角 A / B 标记。返回 (base_key, side_tag, desc)
+
+    例如: '15A_超绝差距_龟男' -> ('15', 'A', '超绝差距_龟男')
+          'Lesson_1_A'        -> ('Lesson_1', 'A', '')
+          '01_辣妹'           -> ('01', None, '辣妹')
+    """
+    for pat in _PERSP_PATTERNS:
+        m = pat.match(stem)
+        if m:
+            base = m.group(1).rstrip("_- ")
+            raw_side = m.group(2).upper()
+            side = "A" if raw_side in ("A", "1") else "B"
+            desc = m.group(3) if len(m.groups()) >= 3 and m.group(3) else ""
+            return base, side, desc
+    m_num = re.match(r"^(\d+)(?:[_\s\-\.](.*))?$", stem)
+    if m_num:
+        return m_num.group(1), None, m_num.group(2) or ""
+    return stem, None, ""
+
+
+def _clean_stem_for_matching(name: str) -> str:
+    """字符与修饰词归一化，用于跨格式模糊比对。"""
+    import unicodedata
+    s = unicodedata.normalize("NFKC", name).strip().lower()
+    s = re.sub(r"[\(\[\{【〖（].*?[\)\]\}】〗）]", "", s)
+    s = re.sub(r"[_\-\s\.]+(台本|script|raw|clean|正文|字幕|text)$", "", s)
+    s = re.sub(r"[_\-\s\.]+(master|audio|vocal|48k|16bit)$", "", s)
+    s = re.sub(r"\b0+(\d+)\b", r"\1", s)
+    s = re.sub(r"[_\-\s\.]+", " ", s).strip()
+    return s
+
+
+def auto_pair_files(file_paths, mode="single"):
+    """智能配对台本与音频文件，支持核心锚点提取与模糊初筛。
+    - mode="single" 或 "multi_speaker": 常规一对一配对
+    - mode="multi_persp": 双视角模式，自动合并同一基名下的视角 A 与 视角 B 音频
+    """
+    import difflib
+
     clean_paths = [os.path.abspath(f) for f in file_paths if f and str(f).strip()]
-    # 排除本工具生成的派生产物（.dropped.txt 删除清单 / .lrc / .srt），
-    # 否则它们会被当成台本误配对（.dropped.txt 的 splitext 后缀也是 .txt）。
     txt_files = [f for f in clean_paths
-                 if os.path.splitext(f)[1].lower() == '.txt'
-                 and not f.lower().endswith('.dropped.txt')]
+                 if os.path.splitext(f)[1].lower() == ".txt"
+                 and not f.lower().endswith(".dropped.txt")]
     audio_files = [f for f in clean_paths if os.path.splitext(f)[1].lower() in AUDIO_EXTS]
-
-    # 台本按「基名」聚合：文件名尾部 _{标记}{标记} 声明说话人，
-    # 基名（剥掉后缀）用于与音频配对。无后缀的保持原样（单人作品）。
-    txt_by_stem = {}
-    for f in txt_files:
-        stem = os.path.splitext(os.path.basename(f))[0]
-        base, marks = _parse_speaker_suffix(stem)
-        if base not in txt_by_stem:
-            txt_by_stem[base] = {'files': [], 'marks': marks}
-        txt_by_stem[base]['files'].append(f)
-        if marks:
-            txt_by_stem[base]['marks'] = marks
-
-    audio_by_stem = {}
-    for f in audio_files:
-        stem = os.path.splitext(os.path.basename(f))[0]
-        audio_by_stem.setdefault(stem, []).append(f)
 
     pairs = []
     unmatched = []
 
-    common_stems = set(txt_by_stem.keys()) & set(audio_by_stem.keys())
-    for stem in sorted(common_stems):
-        info = txt_by_stem[stem]
-        for txt in info['files']:
-            for aud in audio_by_stem[stem]:
-                pairs.append({'script': txt, 'audio': aud, 'name': stem,
-                              'speaker_marks': list(info['marks'])})
+    if mode == "multi_persp":
+        # ── 双视角模式配对逻辑 ──
+        aud_by_base = {}
+        for aud in audio_files:
+            stem = os.path.splitext(os.path.basename(aud))[0]
+            base, side, desc = _extract_perspective_tag(stem)
+            aud_by_base.setdefault(base, {})
+            if side not in aud_by_base[base]:
+                aud_by_base[base][side] = aud
+            else:
+                aud_by_base[base].setdefault("extra", []).append(aud)
 
-    for stem in sorted(set(txt_by_stem.keys()) - set(audio_by_stem.keys())):
-        for txt in txt_by_stem[stem]['files']:
-            unmatched.append({'type': '缺音频', 'file': txt, 'name': stem})
+        txt_by_base = {}
+        for txt in txt_files:
+            stem = os.path.splitext(os.path.basename(txt))[0]
+            base, side, desc = _extract_perspective_tag(stem)
+            txt_by_base.setdefault(base, []).append(txt)
+            if stem != base:
+                txt_by_base.setdefault(stem, []).append(txt)
 
-    for stem in sorted(set(audio_by_stem.keys()) - set(txt_by_stem.keys())):
-        for aud in audio_by_stem[stem]:
-            unmatched.append({'type': '缺台本', 'file': aud, 'name': stem})
+        all_bases = sorted(set(aud_by_base.keys()) | set(txt_by_base.keys()))
+        for base in all_bases:
+            auds = aud_by_base.get(base, {})
+            txts = txt_by_base.get(base, [])
+            aud_a = auds.get("A")
+            aud_b = auds.get("B")
+            if not aud_a and not aud_b and None in auds:
+                aud_a = auds[None]
+
+            script_file = txts[0] if txts else None
+
+            if script_file and (aud_a or aud_b):
+                pairs.append({
+                    "name": base,
+                    "script": script_file,
+                    "audio": aud_a or aud_b,
+                    "audio_b": aud_b if aud_a else None,
+                    "confidence": 100,
+                    "speaker_marks": [],
+                })
+
+        paired_auds = {p["audio"] for p in pairs if p.get("audio")} | {p["audio_b"] for p in pairs if p.get("audio_b")}
+        paired_txts = {p["script"] for p in pairs if p.get("script")}
+        rem_auds = [a for a in audio_files if a not in paired_auds]
+        rem_txts = [t for t in txt_files if t not in paired_txts]
+
+        # 对剩余未配对项尝试模糊匹配
+        if rem_txts and rem_auds:
+            for txt in list(rem_txts):
+                t_stem = os.path.splitext(os.path.basename(txt))[0]
+                t_clean = _clean_stem_for_matching(t_stem)
+                best_aud = None
+                best_score = 0.0
+                for aud in rem_auds:
+                    a_stem = os.path.splitext(os.path.basename(aud))[0]
+                    a_clean = _clean_stem_for_matching(a_stem)
+                    score = difflib.SequenceMatcher(None, t_clean, a_clean).ratio()
+                    if score > best_score:
+                        best_score = score
+                        best_aud = aud
+                if best_aud and best_score >= 0.45:
+                    pairs.append({
+                        "name": t_stem,
+                        "script": txt,
+                        "audio": best_aud,
+                        "audio_b": None,
+                        "confidence": int(best_score * 100),
+                        "speaker_marks": [],
+                    })
+                    rem_txts.remove(txt)
+                    rem_auds.remove(best_aud)
+
+        for aud in rem_auds:
+            unmatched.append({"type": "缺台本", "file": aud, "name": os.path.splitext(os.path.basename(aud))[0]})
+        for txt in rem_txts:
+            unmatched.append({"type": "缺音频", "file": txt, "name": os.path.splitext(os.path.basename(txt))[0]})
+
+    else:
+        # ── 单人顺序 / 多人分角色常规一对一配对 ──
+        txt_by_stem = {}
+        for f in txt_files:
+            stem = os.path.splitext(os.path.basename(f))[0]
+            base, marks = _parse_speaker_suffix(stem)
+            if base not in txt_by_stem:
+                txt_by_stem[base] = {"files": [], "marks": marks}
+            txt_by_stem[base]["files"].append(f)
+
+        audio_by_stem = {}
+        for f in audio_files:
+            stem = os.path.splitext(os.path.basename(f))[0]
+            audio_by_stem.setdefault(stem, []).append(f)
+
+        # 1. 严格基名精确匹配
+        common_stems = set(txt_by_stem.keys()) & set(audio_by_stem.keys())
+        paired_txts = set()
+        paired_auds = set()
+        for stem in sorted(common_stems):
+            info = txt_by_stem[stem]
+            for txt in info["files"]:
+                for aud in audio_by_stem[stem]:
+                    if txt not in paired_txts and aud not in paired_auds:
+                        pairs.append({
+                            "script": txt,
+                            "audio": aud,
+                            "audio_b": None,
+                            "name": stem,
+                            "confidence": 100,
+                            "speaker_marks": list(info["marks"]),
+                        })
+                        paired_txts.add(txt)
+                        paired_auds.add(aud)
+
+        rem_txts = [f for f in txt_files if f not in paired_txts]
+        rem_auds = [f for f in audio_files if f not in paired_auds]
+
+        # 2. 若双方各只剩 1 个，直接保底配对
+        if len(rem_txts) == 1 and len(rem_auds) == 1:
+            t = rem_txts[0]
+            a = rem_auds[0]
+            s_t = os.path.splitext(os.path.basename(t))[0]
+            pairs.append({
+                "script": t,
+                "audio": a,
+                "audio_b": None,
+                "name": s_t,
+                "confidence": 90,
+                "speaker_marks": [],
+            })
+            rem_txts.clear()
+            rem_auds.clear()
+
+        # 3. 规约模糊相似度配对
+        if rem_txts and rem_auds:
+            candidates = []
+            for t in rem_txts:
+                t_stem = os.path.splitext(os.path.basename(t))[0]
+                t_clean = _clean_stem_for_matching(t_stem)
+                for a in rem_auds:
+                    a_stem = os.path.splitext(os.path.basename(a))[0]
+                    a_clean = _clean_stem_for_matching(a_stem)
+                    score = difflib.SequenceMatcher(None, t_clean, a_clean).ratio()
+                    if score >= 0.45:
+                        candidates.append((score, t, a, t_stem))
+
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            used_t = set()
+            used_a = set()
+            for score, t, a, t_stem in candidates:
+                if t not in used_t and a not in used_a:
+                    pairs.append({
+                        "script": t,
+                        "audio": a,
+                        "audio_b": None,
+                        "name": t_stem,
+                        "confidence": int(score * 100),
+                        "speaker_marks": [],
+                    })
+                    used_t.add(t)
+                    used_a.add(a)
+
+            rem_txts = [t for t in rem_txts if t not in used_t]
+            rem_auds = [a for a in rem_auds if a not in used_a]
+
+        for txt in rem_txts:
+            unmatched.append({"type": "缺音频", "file": txt, "name": os.path.splitext(os.path.basename(txt))[0]})
+        for aud in rem_auds:
+            unmatched.append({"type": "缺台本", "file": aud, "name": os.path.splitext(os.path.basename(aud))[0]})
 
     return pairs, unmatched
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  ASMR · 二次元 (Anime / ACG) 视觉设计系统
-# ═══════════════════════════════════════════════════════════════════
-BG = "#181926"             # 深邃夜空紫底色 (Catppuccin Macchiato / Tokyo Night)
-CARD_BG = "#24273a"        # 柔和丝绒深紫卡片
-CARD_BG_ALT = "#1e2030"    # 表头与较深次级卡片
-CARD_INNER = "#2d3149"     # 输入与内嵌微亮区域
-TEXT = "#cad3f5"           # 梦幻奶白紫文字
-TEXT_MUTED = "#939ab7"     # 薰衣草淡灰
-TEXT_ACCENT = "#f5c2e7"    # 浅樱粉高亮文字
-ACCENT_PINK = "#f7768e"    # 樱花主粉色
-ACCENT_PINK_HOVER = "#ff94a9"
-ACCENT_PURPLE = "#bb9af7"  # 薰衣草梦幻紫
-ACCENT_PURPLE_HOVER = "#cba6f7"
-ACCENT_CYAN = "#7dcfff"    # 梦幻天青
-BORDER = "#3b3f5c"         # 柔和描边
-BORDER_ACTIVE = "#c6a0f6"  # 高亮紫描边
-SUCCESS = "#a6e3a1"        # 抹茶嫩绿
-WARN = "#f9e2af"           # 奶油暖黄
-ERROR = "#f38ba8"          # 樱桃红
-
-STATUS_ICONS = {
-    'pending': '  ⏳ 待命中',
-    'running': '  ⚡ 对齐中...',
-    'done':    '  💖 已完成',
-    'failed':  '  💔 失败',
-    'warn':    '  ⚠️ 缺音频',
-}
-
 
 def build_gui():
-    root = (TkinterDnD.Tk() if HAS_DND else tk.Tk())
-    root.title("🌸 FA-ASMR V2 · 二次元音声对齐工具 ✨")
-    root.geometry("880x700")
-    root.minsize(720, 520)
-    root.configure(bg=BG)
+    """创建界面并接入现有对齐管线，保持打包与源码启动路径一致。"""
+    from types import SimpleNamespace
+    from fa_asmr_ui import build_ui
 
-    # ── 载入 ASMR 看板娘徽章与图标 ──
-    mascot_img = None
-    if HAS_PIL:
-        try:
-            mascot_path = os.path.join(SCRIPT_DIR, "assets", "mascot_icon.png")
-            if not os.path.isfile(mascot_path):
-                mascot_path = os.path.join(SCRIPT_DIR, "assets", "asmr_mascot.png")
-            if os.path.isfile(mascot_path):
-                _im = Image.open(mascot_path).convert("RGBA")
-                _im = _im.resize((56, 56), Image.Resampling.LANCZOS)
-                mascot_img = ImageTk.PhotoImage(_im)
-                root.mascot_img = mascot_img  # 保留引用避免 GC
-                try:
-                    root.wm_iconphoto(True, mascot_img)
-                except Exception:
-                    pass
-        except Exception:
-            mascot_img = None
-
-    style = ttk.Style()
-    style.theme_use("clam")
-
-    # ── TTK 全局样式微调 ──
-    style.configure("Treeview",
-                    background=CARD_BG,
-                    foreground=TEXT,
-                    fieldbackground=CARD_BG,
-                    borderwidth=0,
-                    rowheight=28,
-                    font=("Microsoft YaHei UI", 9))
-    style.configure("Treeview.Heading",
-                    background=CARD_BG_ALT,
-                    foreground=ACCENT_PURPLE,
-                    font=("Microsoft YaHei UI", 9, "bold"),
-                    relief=tk.FLAT,
-                    borderwidth=0)
-    style.map("Treeview.Heading",
-              background=[("active", CARD_INNER)],
-              foreground=[("active", TEXT_ACCENT)])
-    style.map("Treeview",
-              background=[("selected", ACCENT_PURPLE)],
-              foreground=[("selected", "#181926")])
-
-    style.configure("TProgressbar",
-                    thickness=14,
-                    borderwidth=0,
-                    troughcolor=CARD_BG_ALT,
-                    background=ACCENT_PINK)
-    style.map("TProgressbar",
-              background=[("active", ACCENT_PINK_HOVER)])
-
-    style.configure("TScrollbar",
-                    background=CARD_BG_ALT,
-                    troughcolor=BG,
-                    borderwidth=0,
-                    arrowsize=11,
-                    relief=tk.FLAT)
-    style.map("TScrollbar",
-              background=[("active", ACCENT_PURPLE), ("pressed", ACCENT_PINK)])
-
-    main = tk.Frame(root, bg=BG)
-    main.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
-
-    # ── 顶栏 Banner ──
-    header = tk.Frame(main, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
-    header.pack(fill=tk.X, pady=(0, 10))
-
-    header_inner = tk.Frame(header, bg=CARD_BG)
-    header_inner.pack(fill=tk.X, padx=12, pady=8)
-
-    title_left = tk.Frame(header_inner, bg=CARD_BG)
-    title_left.pack(side=tk.LEFT)
-
-    if mascot_img:
-        mascot_label = tk.Label(title_left, image=mascot_img, bg=CARD_BG)
-        mascot_label.pack(side=tk.LEFT, padx=(0, 10))
-
-    title_text_box = tk.Frame(title_left, bg=CARD_BG)
-    title_text_box.pack(side=tk.LEFT)
-
-    tk.Label(title_text_box, text="🌸 FA-ASMR V2 · 二次元音声对齐",
-             font=("Microsoft YaHei UI", 15, "bold"),
-             fg=ACCENT_PINK, bg=CARD_BG).pack(anchor="w")
-    tk.Label(title_text_box, text="✨ 双声道 Better-Ear 全局声学对齐 · 梦幻输出 LRC / SRT 💫",
-             font=("Microsoft YaHei UI", 9),
-             fg=TEXT_MUTED, bg=CARD_BG).pack(anchor="w", pady=(2, 0))
-
-    # 右侧设备徽标
-    dev_badge_text = "✨ CUDA 加速模式" if CUDA_OK else "💤 CPU 运算模式"
-    dev_badge_fg = SUCCESS if CUDA_OK else TEXT_MUTED
-    tk.Label(header_inner, text=dev_badge_text, font=("Microsoft YaHei UI", 9, "bold"),
-             fg=dev_badge_fg, bg=CARD_INNER, padx=12, pady=4, relief=tk.FLAT).pack(side=tk.RIGHT)
-
-    # ── 拖放区 Drop Zone ──
-    drop_frame = tk.Frame(main, bg=CARD_INNER, height=88,
-                          highlightbackground=ACCENT_PURPLE, highlightthickness=1)
-    drop_frame.pack(fill=tk.X, pady=(0, 10))
-    drop_frame.pack_propagate(False)
-
-    drop_inner = tk.Frame(drop_frame, bg=CARD_INNER)
-    drop_inner.place(relx=0.01, rely=0.08, relwidth=0.98, relheight=0.84)
-
-    drop_text_var = tk.StringVar(
-        value="🌸 拖放台本 (.txt) 与音频文件 (.wav / .mp3 / .flac / .m4a / .ogg) 到此处 ~\n✨ 或点击此处挑选文件 · 自动按名称智能配对 🎵"
+    root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
+    ctx = SimpleNamespace(
+        root=root,
+        script_dir=SCRIPT_DIR,
+        settings_file=SETTINGS_FILE,
+        cuda_ok=CUDA_OK,
+        has_dnd=HAS_DND,
+        dnd_files=DND_FILES if HAS_DND else None,
+        pil=HAS_PIL,
+        auto_pair_files=auto_pair_files,
+        run_pipeline=run_pipeline,
+        lora_path=str(getattr(align, "DEFAULT_LORA_PATH", "")),
+        release_gpu=_release_gpu,
+        is_running=lambda: bool(getattr(root, "_fa_running", False)),
+        start_worker=lambda target: _start_worker(root, target),
     )
-    drop_label = tk.Label(drop_inner, textvariable=drop_text_var,
-                          font=("Microsoft YaHei UI", 10),
-                          fg=TEXT_ACCENT, bg=CARD_INNER, cursor="hand2")
-    drop_label.pack(expand=True)
+    return build_ui(ctx)
 
-    def _drop_hover_enter(e):
-        drop_frame.config(highlightbackground=ACCENT_PINK, bg="#362f4b")
-        drop_inner.config(bg="#362f4b")
-        drop_label.config(bg="#362f4b", fg="#ffffff")
 
-    def _drop_hover_leave(e):
-        drop_frame.config(highlightbackground=ACCENT_PURPLE, bg=CARD_INNER)
-        drop_inner.config(bg=CARD_INNER)
-        drop_label.config(bg=CARD_INNER, fg=TEXT_ACCENT)
-
-    drop_frame.bind("<Enter>", _drop_hover_enter)
-    drop_frame.bind("<Leave>", _drop_hover_leave)
-    drop_inner.bind("<Enter>", _drop_hover_enter)
-    drop_inner.bind("<Leave>", _drop_hover_leave)
-    drop_label.bind("<Enter>", _drop_hover_enter)
-    drop_label.bind("<Leave>", _drop_hover_leave)
-
-    _existing_names = set()
-    _task_store = {}
-
-    def _add_files_to_list(files):
-        if not files:
-            return
-        pairs, unmatched = auto_pair_files(files)
-        added = 0
-        for p in pairs:
-            if p['name'] not in _existing_names:
-                iid = task_tree.insert("", "end", values=(
-                    p['name'], os.path.basename(p['script']),
-                    os.path.basename(p['audio']),
-                    STATUS_ICONS['pending']), tags=('pending',))
-                _task_store[iid] = {**p, 'status': 'pending', 'iid': iid}
-                _existing_names.add(p['name'])
-                added += 1
-        for u in unmatched:
-            if u['name'] not in _existing_names and u['type'] == '缺音频':
-                iid = task_tree.insert("", "end", values=(
-                    u['name'], os.path.basename(u['file']),
-                    "— (未匹配)", STATUS_ICONS['warn']), tags=('warn',))
-                _task_store[iid] = {
-                    'script': u['file'], 'audio': None,
-                    'name': u['name'], 'status': 'pending', 'iid': iid}
-                _existing_names.add(u['name'])
-                added += 1
-        if added:
-            drop_text_var.set(f"💖 已成功添加 {added} 项任务 ~ 可继续拖放追加 ✨")
-            update_status(f"已载入 {len(_task_store)} 项任务")
-        else:
-            drop_text_var.set("🌸 拖放台本 (.txt) 与音频文件到此处 ~\n✨ 点击挑选文件 · 自动按名称智能配对 🎵")
-
-    def _browse_files(e=None):
-        files = filedialog.askopenfilenames(
-            title="选择台本与音频文件",
-            filetypes=[("支持的台本与音频", "*.txt;*.wav;*.mp3;*.flac;*.m4a;*.ogg;*.aac;*.opus;*.wma"), ("所有文件", "*.*")])
-        if files:
-            _add_files_to_list(list(files))
-
-    drop_label.bind("<Button-1>", _browse_files)
-    drop_inner.bind("<Button-1>", _browse_files)
-    drop_frame.bind("<Button-1>", _browse_files)
-
-    if HAS_DND:
-        def _on_drop(event):
-            raw = event.data
-            paths = []
-            try:
-                # 优先使用 Tk 原生 splitlist 解析标准带空格和花括号的路径列表
-                items = root.tk.splitlist(raw)
-                for item in items:
-                    p = str(item).strip().strip('"').strip("'")
-                    if p:
-                        paths.append(os.path.abspath(p))
-            except Exception:
-                # 备选正则兜底
-                for m in re.finditer(r'\{([^}]*)\}', raw):
-                    paths.append(os.path.abspath(m.group(1).strip()))
-                cleaned = re.sub(r'\{[^}]*\}', '', raw)
-                for p in cleaned.split():
-                    if p.strip():
-                        paths.append(os.path.abspath(p.strip()))
-
-            _add_files_to_list(paths)
-
-        drop_frame.drop_target_register(DND_FILES)
-        drop_frame.dnd_bind('<<Drop>>', _on_drop)
-        drop_inner.drop_target_register(DND_FILES)
-        drop_inner.dnd_bind('<<Drop>>', _on_drop)
-        drop_label.drop_target_register(DND_FILES)
-        drop_label.dnd_bind('<<Drop>>', _on_drop)
-
-    # ── 高级设置面板 (折叠面板，静音吸附默认开启无需配置) ──
-    adv_header_frame = tk.Frame(main, bg=BG)
-    adv_header_frame.pack(fill=tk.X, pady=(0, 4))
-
-    adv_show = tk.BooleanVar(value=False)
-    adv_toggle = tk.Label(adv_header_frame, text="🎀 高级设置 (点击展开)",
-                          font=("Microsoft YaHei UI", 9), fg=TEXT_MUTED, bg=BG, cursor="hand2")
-    adv_toggle.pack(side=tk.LEFT)
-
-    adv_panel = tk.Frame(main, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
-    adv_panel_inner = tk.Frame(adv_panel, bg=CARD_BG)
-    adv_panel_inner.pack(fill=tk.X, padx=12, pady=8)
-
-    def _toggle_adv():
-        if adv_show.get():
-            adv_show.set(False)
-            adv_panel.pack_forget()
-            adv_toggle.configure(text="🎀 高级设置 (点击展开)", fg=TEXT_MUTED)
-        else:
-            adv_show.set(True)
-            adv_panel.pack(fill=tk.X, pady=(0, 8), before=list_frame)
-            adv_toggle.configure(text="🎀 高级设置 (点击收起)", fg=ACCENT_PURPLE)
-
-    adv_toggle.bind("<Button-1>", lambda e: _toggle_adv())
-
-    dev_var = tk.StringVar(value="cuda" if CUDA_OK else "cpu")
-    vram_chunk_var = tk.StringVar(value="6000")
-    end_extend_var = tk.StringVar(value="0")
-    ono_gate_var = tk.BooleanVar(value=True)
-
-    _var_meta = [
-        (dev_var, "dev", str),
-        (vram_chunk_var, "vram_chunk", str),
-        (end_extend_var, "end_extend", str),
-        (ono_gate_var, "ono_gate", lambda v: v in (True, "true", "True", 1, "1")),
-    ]
-
-    def _save_settings():
-        try:
-            data = {key: var.get() for var, key, _ in _var_meta}
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                import json
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    def _load_settings():
-        if not os.path.isfile(SETTINGS_FILE):
-            return
-        try:
-            import json
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            for var, key, cvt in _var_meta:
-                if key in data:
-                    var.set(cvt(data[key]))
-        except Exception:
-            pass
-
-    _load_settings()
-
-    row1 = tk.Frame(adv_panel_inner, bg=CARD_BG)
-    row1.pack(fill=tk.X, pady=(0, 4))
-    tk.Label(row1, text="计算设备:", font=("Microsoft YaHei UI", 9), fg=TEXT_MUTED, bg=CARD_BG).pack(side=tk.LEFT, padx=(0, 4))
-    cb = ttk.Combobox(row1, textvariable=dev_var, values=["cuda", "cpu"] if CUDA_OK else ["cpu"], state="readonly", width=6)
-    cb.pack(side=tk.LEFT, padx=(0, 16))
-
-    if CUDA_OK:
-        tk.Label(row1, text="显存分块(帧):", font=("Microsoft YaHei UI", 9), fg=TEXT_MUTED, bg=CARD_BG).pack(side=tk.LEFT, padx=(0, 4))
-        tk.Entry(row1, textvariable=vram_chunk_var, font=("Consolas", 9), width=6,
-                 relief=tk.FLAT, bg=CARD_BG_ALT, fg=TEXT, insertbackground=ACCENT_PINK,
-                 highlightbackground=BORDER, highlightthickness=1).pack(side=tk.LEFT, padx=(0, 16))
-
-    row2 = tk.Frame(adv_panel_inner, bg=CARD_BG)
-    row2.pack(fill=tk.X, pady=(4, 0))
-    tk.Label(row2, text="行结束延长(秒):", font=("Microsoft YaHei UI", 9), fg=TEXT_MUTED, bg=CARD_BG).pack(side=tk.LEFT, padx=(0, 4))
-    tk.Entry(row2, textvariable=end_extend_var, font=("Consolas", 9), width=5,
-             relief=tk.FLAT, bg=CARD_BG_ALT, fg=TEXT, insertbackground=ACCENT_PINK,
-             highlightbackground=BORDER, highlightthickness=1).pack(side=tk.LEFT)
-    tk.Label(row2, text="0=不延长  推荐 0.5~1.5s  (≤下一句起点)", font=("Microsoft YaHei UI", 8),
-             fg=TEXT_MUTED, bg=CARD_BG).pack(side=tk.LEFT, padx=(8, 0))
-
-    row3 = tk.Frame(adv_panel_inner, bg=CARD_BG)
-    row3.pack(fill=tk.X, pady=(4, 0))
-    tk.Checkbutton(row3, text="拟声词删除 (删除错位的喘息/呻吟拟声，保留语义)",
-                   variable=ono_gate_var, font=("Microsoft YaHei UI", 9),
-                   fg=TEXT, bg=CARD_BG, selectcolor=CARD_BG_ALT,
-                   activebackground=CARD_BG, activeforeground=TEXT,
-                   highlightthickness=0, bd=0).pack(side=tk.LEFT)
-
-    # ── 任务列表 (Treeview) ──
-    list_frame = tk.Frame(main, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
-    list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
-
-    cols = ("name", "script", "audio", "status")
-    task_tree = ttk.Treeview(list_frame, columns=cols, show="headings", height=8, selectmode="extended")
-    task_tree.heading("name", text="🌸 任务配对")
-    task_tree.heading("script", text="📄 台本文件 (Script)")
-    task_tree.heading("audio", text="🎵 音频文件 (Audio)")
-    task_tree.heading("status", text="📌 状态 (Status)")
-
-    task_tree.column("name", width=150, minwidth=100, stretch=True)
-    task_tree.column("script", width=220, minwidth=140, stretch=True)
-    task_tree.column("audio", width=220, minwidth=140, stretch=True)
-    task_tree.column("status", width=110, minwidth=80, stretch=False, anchor="center")
-
-    task_tree.tag_configure('pending', foreground=TEXT_MUTED)
-    task_tree.tag_configure('running', foreground=ACCENT_CYAN)
-    task_tree.tag_configure('done',    foreground=SUCCESS)
-    task_tree.tag_configure('failed',  foreground=ERROR)
-    task_tree.tag_configure('warn',    foreground=WARN)
-
-    sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=task_tree.yview)
-    task_tree.configure(yscrollcommand=sb.set)
-    task_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    sb.pack(side=tk.RIGHT, fill=tk.Y)
-
-    if HAS_DND:
-        task_tree.drop_target_register(DND_FILES)
-        task_tree.dnd_bind('<<Drop>>', _on_drop)
-
-    # ── 控制与进度工具栏 ──
-    btn_bar = tk.Frame(main, bg=BG)
-    btn_bar.pack(fill=tk.X, pady=(0, 8))
-
-    def _clear_tasks():
-        task_tree.delete(*task_tree.get_children())
-        _task_store.clear()
-        _existing_names.clear()
-        drop_text_var.set("🌸 拖放台本 (.txt) 与音频文件到此处 ~\n✨ 点击挑选文件 · 自动按名称智能配对 🎵")
-        progress.configure(value=0)
-        update_status("🌸 就绪 ~ 请添加任务")
-
-    def _delete_selected():
-        for iid in task_tree.selection():
-            if iid in _task_store:
-                name = _task_store[iid]['name']
-                _existing_names.discard(name)
-                del _task_store[iid]
-                task_tree.delete(iid)
-        update_status(f"当前剩余 {len(_task_store)} 项任务")
-
-    clear_btn = tk.Button(btn_bar, text="🗑️ 清空列表", font=("Microsoft YaHei UI", 9),
-                          fg=TEXT, bg=CARD_BG, activebackground=CARD_INNER, activeforeground=TEXT_ACCENT,
-                          relief=tk.FLAT, padx=12, pady=4, cursor="hand2",
-                          highlightbackground=BORDER, highlightthickness=1,
-                          command=_clear_tasks)
-    clear_btn.pack(side=tk.LEFT, padx=(0, 6))
-
-    del_btn = tk.Button(btn_bar, text="❌ 删除选中", font=("Microsoft YaHei UI", 9),
-                        fg=TEXT, bg=CARD_BG, activebackground=CARD_INNER, activeforeground=TEXT_ACCENT,
-                        relief=tk.FLAT, padx=12, pady=4, cursor="hand2",
-                        highlightbackground=BORDER, highlightthickness=1,
-                        command=_delete_selected)
-    del_btn.pack(side=tk.LEFT)
-
-    # 进度条与状态文案
-    start_btn = tk.Button(btn_bar, text="🌸  开始全部对齐  ✨",
-                          font=("Microsoft YaHei UI", 10, "bold"),
-                          fg="white", bg=ACCENT_PINK, activebackground=ACCENT_PINK_HOVER,
-                          activeforeground="white", relief=tk.FLAT,
-                          padx=20, pady=4, cursor="hand2")
-    start_btn.pack(side=tk.RIGHT, padx=(10, 0))
-
-    progress = ttk.Progressbar(btn_bar, mode="determinate", length=180)
-    progress.pack(side=tk.RIGHT, padx=(10, 0))
-
-    status_var = tk.StringVar(value="🌸 准备就绪 ~ 拖放文件开始")
-    status_label = tk.Label(btn_bar, textvariable=status_var,
-                            font=("Microsoft YaHei UI", 9), fg=TEXT_MUTED, bg=BG)
-    status_label.pack(side=tk.RIGHT)
-
-    def update_status(msg):
-        root.after(0, lambda: status_var.set(msg))
-
-    # ── 日志控制台 ──
-    log_header = tk.Frame(main, bg=BG)
-    log_header.pack(fill=tk.X, pady=(0, 2))
-    tk.Label(log_header, text="📜 运行日志 (Log Console):",
-             font=("Microsoft YaHei UI", 9, "bold"),
-             fg=TEXT, bg=BG, anchor="w").pack(side=tk.LEFT)
-
-    log_frame = tk.Frame(main, bg="#141521", highlightbackground=BORDER, highlightthickness=1)
-    log_frame.pack(fill=tk.BOTH, expand=True)
-
-    log_text = tk.Text(log_frame, bg="#141521", fg=TEXT,
-                       font=("Consolas", 9), relief=tk.FLAT,
-                       wrap=tk.WORD, height=6, padx=8, pady=6,
-                       insertbackground=ACCENT_PINK)
-    log_sb = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_text.yview)
-    log_text.configure(yscrollcommand=log_sb.set)
-    log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    log_sb.pack(side=tk.RIGHT, fill=tk.Y)
-
-    def append_log(msg):
-        def _do():
-            log_text.insert(tk.END, msg + "\n")
-            log_text.see(tk.END)
-        root.after(0, _do)
-
-    # ── 线程池执行 ──
-    _running = False
-
-    def _run_all():
-        nonlocal _running
-        if _running:
-            return
-        _save_settings()
-        items = list(_task_store.values())
-        valid_items = [it for it in items if it.get("audio") and it.get("script") and it.get("status") != "done"]
-        if not valid_items:
-            messagebox.showinfo("提示", "🌸 没有待处理的有效配对任务哦！请先拖放台本与音频文件。")
-            return
-
-        _running = True
-        start_btn.config(state=tk.DISABLED, text="⚡ 正在对齐中...", bg=CARD_INNER)
-        clear_btn.config(state=tk.DISABLED)
-        del_btn.config(state=tk.DISABLED)
-        progress.configure(value=0)
-
-        total_cnt = len(valid_items)
-        append_log("\n" + "═" * 58)
-        append_log(f"🌸 开始批量处理 {total_cnt} 个任务 (默认开启静音吸附优化)")
-        append_log(f"⚡ 计算设备: {'CUDA (GPU 加速)' if dev_var.get() == 'cuda' else 'CPU 模式'}")
-        append_log("═" * 58)
-
-        def _worker():
-            nonlocal _running
-            succ_cnt = 0
-            fail_cnt = 0
-            for idx, it in enumerate(valid_items):
-                iid = it["iid"]
-                root.after(0, lambda id=iid: (task_tree.set(id, "status", STATUS_ICONS["running"]),
-                                              task_tree.item(id, tags=('running',))))
-                it["status"] = "running"
-                append_log(f"\n[{idx + 1}/{total_cnt}] 🌸 正在对齐: {it['name']}")
-                append_log(f"  📄 台本: {it['script']}")
-                append_log(f"  🎵 音频: {it['audio']}")
-
-                def _pct(pct, m):
-                    gp = (idx * 100 + pct) / total_cnt
-                    root.after(0, lambda v=gp, msg=m: (progress.configure(value=v), update_status(msg)))
-
-                ext_sec = float(end_extend_var.get() or 0.0)
-                ok, out_path, err = run_pipeline(
-                    script_path=it["script"],
-                    audio_path=it["audio"],
-                    lora_path=str(getattr(align, "DEFAULT_LORA_PATH", "")),
-                    log_callback=append_log,
-                    progress_callback=_pct,
-                    dev=dev_var.get(),
-                    vram_chunk=int(vram_chunk_var.get() or 6000),
-                    persist_gpu=True,
-                    line_end_extend=ext_sec,
-                    enable_silence_snap=True,
-                    enable_resegment=True,
-                    enable_ono_gate=bool(ono_gate_var.get()),
-                )
-                if ok:
-                    root.after(0, lambda id=iid: (task_tree.set(id, "status", STATUS_ICONS["done"]),
-                                                  task_tree.item(id, tags=('done',))))
-                    it["status"] = "done"
-                    succ_cnt += 1
-                else:
-                    root.after(0, lambda id=iid: (task_tree.set(id, "status", STATUS_ICONS["failed"]),
-                                                  task_tree.item(id, tags=('failed',))))
-                    it["status"] = "failed"
-                    fail_cnt += 1
-                    append_log(f"  💔 失败原因: {err}")
-
-            _release_gpu()
-            progress.configure(value=100)
-            _running = False
-            append_log("\n" + "═" * 58)
-            append_log(f"💖 全部任务处理完成！成功 {succ_cnt} 个，失败 {fail_cnt} 个 ✨")
-            append_log("═" * 58 + "\n")
-            update_status(f"💖 处理完成: 成功 {succ_cnt}, 失败 {fail_cnt}")
-
-            root.after(0, lambda: (
-                start_btn.config(state=tk.NORMAL, text="🌸  开始全部对齐  ✨", bg=ACCENT_PINK),
-                clear_btn.config(state=tk.NORMAL),
-                del_btn.config(state=tk.NORMAL),
-            ))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    start_btn.config(command=_run_all)
-
-    # ── 居中显示与关闭持久化 ──
-    root.update_idletasks()
-    w, h = root.winfo_width(), root.winfo_height()
-    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
-
-    def _on_close():
-        _save_settings()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", _on_close)
-    return root
+def _start_worker(root, target):
+    root._fa_set_running(True)
+    threading.Thread(target=target, daemon=True).start()
 
 
 def _run_self_test() -> int:
@@ -1635,8 +1591,10 @@ def _run_self_test() -> int:
     def _align_engine():
         import torch
         import align
+        import align_multispeaker  # noqa: F401
+        import align_multiperspective  # noqa: F401
         dev = "cuda" if torch.cuda.is_available() else "cpu"
-        return f"align.py 可导入，设备={dev}"
+        return f"align.py + align_multispeaker.py + align_multiperspective.py 可导入，设备={dev}"
 
     step("第三方依赖导入", _deps)
     step("MMS-FA 权重", _model_file)

@@ -85,7 +85,8 @@ hiddenimports = [
     'align_trellis', 'haruraw2norm', 'lrc_end_extend', 'resegment',
     'advanced_config', 'torch_bootstrap',
     'inline_leak_clean', 'merge_short', 'ono_filter', 'ono_base', 'ono_block_corpus',
-    'clause', 'np_compat',
+    'clause', 'np_compat', 'fa_asmr_ui', 'fa_asmr_i18n',
+    'align_multispeaker', 'align_multiperspective',
 
     # ── 必须显式声明：PyInstaller 的依赖分析**漏收**这两者 ──
     # 实测（屏蔽即崩，报 "Unable to import required dependency dateutil"）：
