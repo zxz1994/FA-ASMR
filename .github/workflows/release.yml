@@ -20,9 +20,6 @@ jobs:
           - variant: cpu
             torch_index: "https://download.pytorch.org/whl/cpu"
             torch_version: "torch==2.6.0+cpu torchaudio==2.6.0+cpu"
-          - variant: gpu
-            torch_index: "https://download.pytorch.org/whl/cu124"
-            torch_version: "torch==2.6.0+cu124 torchaudio==2.6.0+cu124"
 
     steps:
       - name: Checkout Code

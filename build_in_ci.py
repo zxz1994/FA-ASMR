@@ -80,7 +80,7 @@ def ensure_dbert_artifacts() -> Path:
     tar_path = dest.parent / "dbert-artifacts.tar.gz"
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    res = subprocess.run(["curl.exe", "-L", "--fail", "-o", str(tar_path),
+    res = subprocess.run(["curl.exe", "-k", "-L", "--fail", "--retry", "3", "-o", str(tar_path),
                           dbert_url, "--progress-bar"])
     if res.returncode != 0 or not tar_path.is_file():
         fail("dBert 权重下载失败。离线构建时请预先把 dbert-artifacts/ "
@@ -110,7 +110,7 @@ def ensure_model():
     log(f"正在从 Meta 官方 CDN 下载 MMS-FA model.pt ...")
     t0 = time.time()
 
-    res = subprocess.run(["curl.exe", "-L", "-o", str(model_path), MODEL_URL, "--progress-bar"])
+    res = subprocess.run(["curl.exe", "-k", "-L", "--retry", "3", "-o", str(model_path), MODEL_URL, "--progress-bar"])
     if res.returncode != 0 or not model_path.is_file():
         fail("下载 MMS-FA model.pt 失败！")
 
