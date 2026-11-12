@@ -75,6 +75,7 @@ def extend_lrc(text, extend):
 
     n = len(parsed)
     changed = 0
+    drop_indices: set[int] = set()
     for i in range(n):
         is_ts, t, rest, raw, m = parsed[i]
         if not is_ts or rest != "":
@@ -88,6 +89,12 @@ def extend_lrc(text, extend):
         new_t = t + extend
         if cap is not None:
             new_t = min(new_t, cap)
+        # 若延长后顶到了下一句起点（两句已无缝衔接），或者原本就已与下一句同起点，
+        # 则剔除该空白清屏行，避免在同一时刻先清屏又立即显屏（产生重复时间戳死行）。
+        if cap is not None and (new_t >= cap - 1e-4):
+            drop_indices.add(i)
+            changed += 1
+            continue
         if new_t > t + 1e-6:
             new_ts = fmt_ts(new_t)
             parsed[i] = (True, new_t, rest, new_ts + raw[m.end():], m)
@@ -99,7 +106,8 @@ def extend_lrc(text, extend):
         if is_ts and rest != "":
             assert raw == lines[i], f"文本行被意外修改: line {i}"
 
-    return "\n".join(p[3] for p in parsed), changed
+    out_lines = [parsed[i][3] for i in range(n) if i not in drop_indices]
+    return "\n".join(out_lines), changed
 
 
 def main():

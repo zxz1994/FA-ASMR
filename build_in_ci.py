@@ -213,6 +213,18 @@ def main(variant: str):
     for cfg in ("fa_asmr_settings.json", "advanced_config.json"):
         if (HERE / cfg).is_file():
             shutil.copy2(HERE / cfg, final_dir / cfg)
+
+    # 针对 CPU / GPU 构建动态校正默认设备
+    settings_dst = final_dir / "fa_asmr_settings.json"
+    if settings_dst.is_file():
+        import json
+        try:
+            s_data = json.loads(settings_dst.read_text(encoding="utf-8"))
+            s_data["dev"] = "cpu" if variant == "cpu" else "cuda"
+            settings_dst.write_text(json.dumps(s_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            log(f"已将打包配置 {settings_dst.name} 默认设备设为: {s_data['dev']}")
+        except Exception as e:
+            log(f"更新默认设备设置警告: {e}")
     
     lora_dst = final_dir / "lora"
     lora_dst.mkdir(parents=True, exist_ok=True)

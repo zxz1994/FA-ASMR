@@ -318,6 +318,8 @@ def build_ui(ctx):
             for var, key, convert in _var_meta:
                 if key in data:
                     var.set(convert(data[key]))
+            if not ctx.cuda_ok:
+                dev_var.set("cpu")
             if "lang" in data and data["lang"] in LANG_MAP:
                 cur_lang = data["lang"]
             else:
