@@ -10,9 +10,9 @@
 
 ---
 
-## 一、核心优势与版本更新 (v2.2.1)
+## 一、核心优势与版本更新 (v2.2.2)
 
-### 🆕 v2.2.1 更新亮点
+### 🆕 v2.2.2 更新亮点
 - **多视角联合对齐引擎四步重构与提速 (`align_multiperspective.py`)**：
   - 引入基于有效音素余弦筛选的纯声学 `SimSeg` 分段校准、主视角清晰度分段归属、以及局部 `Δt` 窗口 Numba JIT (`nogil=True`) 检索与双视角并发执行；
   - 改为单次解码音频并按需切片计算 STFT 相干性，显著缩短多视角对齐耗时，原生输出视角 A / B 各自独立的 `.lrc` 与 `.srt` 时间轴。
@@ -64,10 +64,10 @@
 
 无需安装 Python 与 PyTorch，下载解压即用，已完整内置 1.26 GB 声学模型与 LoRA 适配器：
 
-- **CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.2.1-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
-- **CUDA GPU 源码/扩展说明**：如需 N 卡极速 GPU / FP16 推理，请按下方 `2.1` 安装 CUDA 版 PyTorch 从源码运行。
+- **CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.2.2-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
+- **CUDA GPU 版**（N 卡用户，速度极快，支持 4 GB+ 显存 FP16）：下载全部分卷（`FA-ASMR-v2.2.2-Windows-GPU.zip.001` 等）与 `merge_split_gpu_zip.bat` 至同一文件夹，双击该批处理自动合并后解压运行 `运行FA-ASMR.bat`。
 
-下载地址：[GitHub Releases (v2.2.1)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+下载地址：[GitHub Releases (v2.2.2)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
 > 以下为源码运行方式，适合开发者或需要自行修改代码的用户。
 
