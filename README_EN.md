@@ -11,9 +11,19 @@
 
 ---
 
-## 1. Core Advantages & Updates (v2.2.2)
+## 1. Core Advantages & Updates (v2.2.3)
 
-### 🆕 What's New in v2.2.2
+### 🆕 What's New in v2.2.3
+- **Direct Original Script Slicing (`FA-ASMR_GUI.py`, `clause.py`, `align_multispeaker.py`)**:
+  - Replaces the fragile char-by-char reverse normalization map with direct `SequenceMatcher` boundary slicing against the original script line, eliminating full-line collapse on spacing voicing marks (`゛`/`゜`) and NFD kana as well as duplication on 1-to-many NFKC expansions (`℃`);
+  - Unifies inline-leak cleanup with `_body_lines` and folds existing `{漢字|かな}` annotations cleanly so markup never leaks across line breaks.
+- **Quotes, Sokuon & Spacing Fixes (`clause.py`, `haruraw2norm.py`, `merge_short.py`)**:
+  - Binds opening quotes/brackets (`「『（`) tightly to following text so leading quotes are never dropped or left dangling at the end of the preceding line;
+  - Excludes unpronounced sokuon `っ`, word-internal prolongation marks, and voicing marks from clause boundaries, fixing dropped `っ` (`って → て`) and spurious spaces (`っ て`, `硬～ い`).
+- **Onomatopoeia Blocker Prolongation Folding (`ono_block_corpus.py`)**:
+  - Folds word-internal `ー/～/〜/~` when checking real-word blocklists so prolonged spoken words and countdown numerals (`ろぉ～く`, `い～～ち`, etc.) are reliably preserved.
+
+### What's New in v2.2.2
 - **4-Stage Multi-Perspective Engine Rewrite & Acceleration (`align_multiperspective.py`)**:
   - Introduces phoneme-filtered acoustic `SimSeg` calibration, home-perspective segment scoring, Numba JIT (`nogil=True`) local `Δt` window search, and concurrent dual-perspective alignment;
   - Uses single-pass audio decoding with lazy sliced STFT coherence checks, substantially reducing runtime while projecting independent A/B native timelines to `.lrc` and `.srt`.
@@ -67,10 +77,10 @@ FA-ASMR V2 utilizes a **100% pure acoustic forced alignment architecture** (Meta
 
 No Python or PyTorch installation required. Unzip and run — the 1.26 GB acoustic model and LoRA adapter are bundled inside:
 
-- **CPU edition** (works on any PC): download `FA-ASMR-v2.2.2-Windows-CPU.zip`, extract, then double-click `运行FA-ASMR.bat`;
-- **CUDA GPU edition** (fast on NVIDIA 4 GB+ GPUs with FP16): download all split parts (`FA-ASMR-v2.2.2-Windows-GPU.zip.001`, etc.) plus `merge_split_gpu_zip.bat` into one folder, double-click the batch file to merge, then extract and run `运行FA-ASMR.bat`.
+- **CPU edition** (works on any PC): download `FA-ASMR-v2.2.3-Windows-CPU.zip`, extract, then double-click `运行FA-ASMR.bat`;
+- **CUDA GPU edition** (fast on NVIDIA 4 GB+ GPUs with FP16): download all split parts (`FA-ASMR-v2.2.3-Windows-GPU.zip.001`, etc.) plus `merge_split_gpu_zip.bat` into one folder, double-click the batch file to merge, then extract and run `运行FA-ASMR.bat`.
 
-Download: [GitHub Releases (v2.2.2)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+Download: [GitHub Releases (v2.2.3)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
 > The section below covers running from source, intended for developers or users who need to modify the code.
 

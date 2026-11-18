@@ -7,7 +7,12 @@ from janome.tokenizer import Tokenizer  # noqa: F401  （仅导入模块；构�
 import pykakasi
 import re
 import logging
-from clause import F, is_text_token as _is_text_token
+from clause import (
+    F,
+    is_open_bracket as _is_open_bracket,
+    is_prolong_mark as _is_prolong_mark,
+    is_text_token as _is_text_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1034,7 +1039,7 @@ _PUNCT_OR_SIL = {'…', '...', '.', '、', '。', '！', '!', '？', '?', '♪',
 
 def _merge_consecutive_punctuation(result):
     """将连续无发音的标点符号/空白项（type 0, 无 pron）原子化合并为单一项。
-    严格保留换行符 \n 作为独立边界，绝不吞并或与普通标点混合。
+    严格保留换行符 \n 作为独立边界，且前导开引号/开括号（「『（等）与词内延音符不与普通标点混并。
     """
     if not result:
         return result
@@ -1051,6 +1056,8 @@ def _merge_consecutive_punctuation(result):
                 and not merged[-1].get('pron')
                 and merged[-1].get('orig') != '\n'
                 and not merged[-1].get(F.RUBY_PLACEHOLDER, False)
+                and (_is_open_bracket(item) == _is_open_bracket(merged[-1]))
+                and (_is_prolong_mark(item) == _is_prolong_mark(merged[-1]))
             ):
                 merged[-1]['orig'] = merged[-1].get('orig', '') + item.get('orig', '')
             else:

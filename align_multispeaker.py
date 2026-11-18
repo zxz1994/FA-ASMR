@@ -3316,7 +3316,7 @@ def post_process_and_merge_streams(
                     has_word_char = any(
                         not x.get(F.ONO_DROPPED)
                         and not x.get(F.RUBY_PLACEHOLDER)
-                        and bool(re.search(r"[ぁ-んァ-ヶー一-龯々A-Za-z0-9０-９]", str(x.get(F.SRC) or x.get("orig", ""))))
+                        and bool(re.search(r"[ぁ-んァ-ヶー一-龯々A-Za-z0-9０-９]", str(_clause_mod.src_text(x))))
                         for x in cur_line
                     )
                     sts = [
@@ -3347,7 +3347,7 @@ def post_process_and_merge_streams(
 
     def _visible_len(blk: List[Dict[str, Any]]) -> int:
         return sum(
-            len(x.get(F.SRC) or x.get("orig", ""))
+            len(_clause_mod.src_text(x))
             for x in blk
             if not x.get(F.ONO_DROPPED) and not x.get(F.RUBY_PLACEHOLDER) and x.get("orig") != "\n"
         )
@@ -3648,7 +3648,7 @@ def build_independent_multispeaker_srt(
             return
 
         has_word = any(
-            _KANJI_ALNUM.search(str(x.get(F.SRC) or x.get("orig", "")))
+            _KANJI_ALNUM.search(str(_clause_mod.src_text(x)))
             for x in active if x.get("orig") != "\n"
         )
         if not has_word:
@@ -3671,7 +3671,7 @@ def build_independent_multispeaker_srt(
         for x in tokens:
             if x.get(F.ONO_DROPPED) or x.get(F.RUBY_PLACEHOLDER) or x.get("orig") == "\n":
                 continue
-            raw_chars.append(str(x.get(F.SRC) or x.get("orig", "")))
+            raw_chars.append(str(_clause_mod.src_text(x)))
         raw_text = "".join(raw_chars)
         clean_text = re.sub(r"\{([^|]+)\|[^}]+\}", r"\1", raw_text).rstrip()
         clean_text = _strip_orphan_punct(clean_text)

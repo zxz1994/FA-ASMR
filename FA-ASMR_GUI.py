@@ -8,7 +8,7 @@
 from __future__ import annotations
 from typing import Optional, Dict, Any
 
-import sys, os, io, re, time, threading, copy
+import sys, os, io, re, time, threading, copy, difflib
 
 # ── windowed (console=False) 冻结模式下绑定标准流 ──────────────────────────
 # PyInstaller 的 windowed bootloader 会把 sys.stdout / sys.stderr 置为 None。
@@ -136,14 +136,6 @@ from clause import F, is_text_token as _is_text_token
 
 AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aac', '.opus', '.wma'}
 
-# 台本原文还原用的归一化函数引用（惰性解析，避免导入期强依赖 furigana 包）。
-def _RA_NORMALIZE(text: str) -> str:
-    try:
-        from fa_asmr_converter import RubyAnnotator
-        return RubyAnnotator.normalize(text)
-    except Exception:
-        return text
-
 
 # ── 说话人标记 ──────────────────────────────────────────────────────
 # 统一形态：〖标记〗（U+3016 / U+3017 包裹）。标记内容可为圈号（①）或人名
@@ -228,7 +220,7 @@ class AutoRuby:
             if _td not in _sys.path:
                 _sys.path.insert(0, _td)
             from fa_asmr_converter import RubyAnnotator
-            _RUBY_ANNOTATOR = RubyAnnotator(verbose=False, strip_inline_readings=True)
+            _RUBY_ANNOTATOR = RubyAnnotator(verbose=False, strip_inline_readings=False)
         # 批量任务复用同一实例：fugashi(UniDic) / pykakasi / yomikata(dBert)
         # 只初始化一次，避免每条音频都重载 UniDic 词典与异读模型。
         self._ann = _RUBY_ANNOTATOR
@@ -487,132 +479,69 @@ def _strip_orphan_punct(text: str) -> str:
     return s[i:].lstrip()
 
 
-def _source_norm_map(src, norm):
-    """建立【归一化文本位置】->【原文字符下标】的单调映射。
-
-    RubyAnnotator.normalize 对绝大多数字符逐字符独立（实测 2626/2627 行），
-    故可把每个原文下标映射到它在归一化文本里占据的区间。返回与 norm 等长的
-    原文下标列表（第 k 项 = norm[k] 对应的 src 下标）。
-
-    逐位对齐 src 与 norm，三种情形：
-      · normalize(src[i]) 非空且与 norm[j:] 前缀相符 -> 正常消费双方；
-      · normalize(src[i]) 为空但 src[i] 本身 == norm[j]（如空格：整体 normalize
-        因 strip 删了它，norm 里却保留）-> 该字符存活，消费双方；
-      · 其余 -> 该源字符被清洗掉，只推进 src。
-    """
-    m = []
-    i = 0
-    j = 0
-    n_src = len(src)
-    n_norm = len(norm)
-    while i < n_src and j < n_norm:
-        try:
-            out = _RA_NORMALIZE(src[i])
-        except Exception:
-            out = src[i]
-        if out and norm.startswith(out, j):
-            m.extend([i] * len(out))
-            j += len(out)
-            i += 1
-        elif src[i] == norm[j] or (src[i].isspace() and norm[j].isspace()):
-            m.append(i)
-            j += 1
-            i += 1
-        else:
-            i += 1
-    while j < n_norm:
-        m.append(i - 1 if i > 0 else 0)
-        j += 1
-    return m
+_INLINE_RUBY_RE = re.compile(r"\{([^|{}]+)\|([^|{}]*)\}")
 
 
-def _attach_source_spans(tokens, annotated_line, source_line, normalize_fn):
-    """给每个 token 挂 _src —— 该 token 在【原始台本行】里对应的原文子串。
+def _strip_ruby_for_src(text: str) -> str:
+    """把原台本里已有的 {漢字|かな} 折叠成表层字，避免 _src 把花括号与读音拆挂到相邻 token。"""
+    if "{" not in text:
+        return text
+    return _INLINE_RUBY_RE.sub(r"\1", text)
 
-    对齐必须消费归一化后的 token（NFKC 把 ① 拍平成 1 等），但字幕输出要还原
-    台本原字符。此处按 token 的 orig 在归一化文本中的位置反查原文区间，组装
-    LRC 时优先用 _src，即可显示原文而不影响对齐标签。
 
-    分两遍：
-      1. 逐 token 在归一化文本里定位 orig（多数为直接子串）。定位失败（音变如
-         う->ー、tokenizer 丢字如中点）时，用「下一个成功定位的 token」回推边界，
-         保证区间连续、无空洞。
-      2. 把相邻 token 之间的原文缝隙（被 tokenizer 丢弃的字符）并入前一个 token，
-         行首未认领部分并入第一个 token，行尾剩余并入最后一个 token。
+def _attach_source_spans(tokens, annotated_line, source_line, normalize_fn=None):
+    """给每个 token 挂 _src —— 直接把可见 token 串与原台本行做双序列锚点对齐并切片。
+
+    不再尝试逐字逆向推算 normalize 行为（曾因 ゛/゜ 变空格后 .strip() 失步导致整行雪崩、
+    或因 ℃/㍿ 展开后左边界回退导致符号翻倍）：直接通过全局序列比对生成单调递增边界数组
+    ``bound[0..len(vis_str)] -> [0..len(plain_src)]``，再按边界严格切分原始台本。
     """
     if not source_line:
         return
-    try:
-        norm = normalize_fn(source_line)
-    except Exception:
+    plain_src = _strip_ruby_for_src(source_line)
+    if not plain_src:
         return
-    if not norm:
-        return
-    m = _source_norm_map(source_line, norm)
-    if len(m) != len(norm):
-        return
-    # ---- 第一遍：顺序定位每个可见 token 在 norm 中的区间（子串匹配） ----
-    anchors = []      # (token_idx, norm_start, norm_end) 或 None
-    pos = 0
+
+    vis_indices = []
+    token_ranges = []
+    vis_parts = []
+    v_pos = 0
     for k, t in enumerate(tokens):
         o = t.get("orig", "")
-        if not o or t.get(F.RUBY_PLACEHOLDER):
-            anchors.append(None)
+        if not o or o == "\n" or t.get(F.RUBY_PLACEHOLDER):
             continue
-        a = norm.find(o, pos)
-        if a >= 0:
-            anchors.append((k, a, a + len(o)))
-            pos = a + len(o)
-        else:
-            anchors.append(None)
-    # 若整行一个都没定位到，放弃（保持 orig 回退）
-    if not any(a for a in anchors):
+        vis_indices.append(k)
+        vis_parts.append(o)
+        token_ranges.append((v_pos, v_pos + len(o)))
+        v_pos += len(o)
+
+    if not vis_indices:
         return
-    # ---- 第一遍补：失败项用左右锚点回推，让 norm 区间连续 ----
-    n_anchors = len(anchors)
-    for k in range(n_anchors):
-        if anchors[k] is not None:
-            continue
-        if not tokens[k].get("orig") or tokens[k].get(F.RUBY_PLACEHOLDER):
-            continue
-        prev_end = 0
-        for j in range(k - 1, -1, -1):
-            if anchors[j] is not None:
-                prev_end = anchors[j][2]
-                break
-        next_start = len(norm)
-        for j in range(k + 1, n_anchors):
-            if anchors[j] is not None:
-                next_start = anchors[j][1]
-                break
-        if next_start < prev_end:
-            next_start = prev_end
-        anchors[k] = (k, prev_end, next_start)
-    # ---- 第二遍：norm 区间 -> 原文下标区间，并补齐缝隙 ----
-    last_src = 0
-    for k in range(n_anchors):
-        a = anchors[k]
-        if a is None:
-            continue
-        _, ns, ne = a
-        if ne <= ns:
-            continue
-        lo = m[ns]
-        i2 = min(ne - 1, len(m) - 1)
-        hi = m[i2] + 1
-        # 缝隙补齐：本 token 起点之前的未认领原文并入本 token
-        if lo > last_src:
-            lo = last_src
-        if hi < lo:
-            hi = lo
-        tokens[k][F.SRC] = source_line[lo:hi]
-        last_src = hi
-    # ---- 行尾剩余并入最后一个挂到 _src 的 token ----
-    if last_src < len(source_line):
-        for k in range(n_anchors - 1, -1, -1):
-            if anchors[k] is not None:
-                tokens[k][F.SRC] = tokens[k].get(F.SRC, "") + source_line[last_src:]
-                break
+    vis_str = "".join(vis_parts)
+    n_v = len(vis_str)
+
+    sm = difflib.SequenceMatcher(None, vis_str, plain_src, autojunk=False)
+    bound = [0] * (n_v + 1)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for d in range(1, i2 - i1 + 1):
+                bound[i1 + d] = j1 + d
+        elif tag == "delete":
+            for d in range(1, i2 - i1 + 1):
+                bound[i1 + d] = j1
+        elif tag == "insert":
+            # 行首未匹配字符保留在 bound[0]=0 之前归属首 token；行中/行尾缝隙并入前一个 token
+            if i1 > 0:
+                bound[i1] = j2
+        elif tag == "replace":
+            lv = i2 - i1
+            lp = j2 - j1
+            for d in range(1, lv):
+                bound[i1 + d] = j1 + min(lp, (d * lp + lv - 1) // lv)
+            bound[i2] = j2
+
+    for k, (ts, te) in zip(vis_indices, token_ranges):
+        tokens[k][F.SRC] = plain_src[bound[ts]:bound[te]]
 
 
 def _release_gpu(ruby=None):
@@ -821,7 +750,7 @@ def run_pipeline(
                 # 挂 _src：该 token 对应的【原文台本字符】，供 LRC 还原原字符
                 # （对齐仍消费归一化后的 token，仅输出层用原文，故标签不受影响）
                 _src_line = lines[_li] if _li < len(lines) else ""
-                _attach_source_spans(_toks, line, _src_line, _RA_NORMALIZE)
+                _attach_source_spans(_toks, line, _src_line)
                 # 挂 _spk：本行说话人元组（注音前已从标记剥离得到）。
                 # 仅用于最终字幕前缀标注，不参与对齐。
                 _spk_line = _spk_of_line[_li] if _li < len(_spk_of_line) else ()

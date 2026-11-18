@@ -45,8 +45,8 @@ _WEAK_COMMA_CHARS = set("、，,・")
 
 # 跨行合并替换内部的 \n 时，仅当左右均为实词/句子且不紧邻这些符号才插半角空格，
 # 既修复无标点短句直接粘连（如「お疲れ様布団」→「お疲れ様 布団」），又保留「、」「……」「（）」紧排。
-_NO_SPACE_AFTER = set("、，,・…‥.―—「『（([【《〈“‘」』）)]】》〉”’")
-_NO_SPACE_BEFORE = set("、。！？!?,，.・…‥」』）)]】》〉”’ーっゃゅょゎ~～")
+_NO_SPACE_AFTER = set("、，,・…‥.―—「『（([【《〈“‘」』）)]】》〉”’~～〜ーっッ゛゜")
+_NO_SPACE_BEFORE = set("、。！？!?,，.・…‥」』）)]】》〉”’ーっッゃゅょゎぁぃぅぇぉャュョヮァィゥェォ~～〜゛゜")
 _RUBY_SURFACE_RE = re.compile(r"\{([^|]+)\|[^}]+\}")
 
 
@@ -158,7 +158,7 @@ def _is_punct_only_clause(result_list: List[Dict[str, Any]],
         o = it.get("orig", "")
         if not o or o == "\n" or it.get(F.RUBY_PLACEHOLDER, False):
             continue
-        if it.get("pron"):
+        if it.get("pron") or clause.is_text_token(it) or clause.is_open_bracket(it) or clause.is_prolong_mark(it) or clause.is_voicing_mark(it):
             return False
         has_punct = True
     return has_punct

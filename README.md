@@ -10,9 +10,19 @@
 
 ---
 
-## 一、核心优势与版本更新 (v2.2.2)
+## 一、核心优势与版本更新 (v2.2.3)
 
-### 🆕 v2.2.2 更新亮点
+### 🆕 v2.2.3 更新亮点
+- **原文台本直接切片还原 (`FA-ASMR_GUI.py`, `clause.py`, `align_multispeaker.py`)**：
+  - 将原先逐字逆推 `normalize()` 的原文映射重写为基于 `SequenceMatcher` 的直接双序列锚点切片，彻底修复台本含独立浊音符（`゛`/`゜`）、NFD 组合假名时后半整行雪崩成省略号/尾字的缺陷，以及 NFKC 一拆多字符（如 `℃`）在 SRT/LRC 中翻倍重复的问题；
+  - 关闭与前置清洗不同步的二次假名剥离，折叠原文已有 `{漢字|かな}` 标注防止花括号撕裂。
+- **字幕引号、促音与连字观感修复 (`clause.py`, `haruraw2norm.py`, `merge_short.py`)**：
+  - 前导开引号/开括号（`「『（`）强绑定至右侧正文，解决行首左引号丢失及上一行行尾孤悬 `「` 的问题；
+  - 排除无读音文本促音 `っ` 与词内延音/浊点作为切分边界，消除 `って → て` 丢促音与 `っ て`、`硬～ い` 误插半角空格问题。
+- **拟声守门实词保护完善 (`ono_block_corpus.py`)**：
+  - 实词黑名单新增词内延音/波浪号折叠匹配（如 `ろぉ～く`、`ご～お`、`い～～ち` 等语义倒计时与延音实词不再被误判为拟声词跳过）。
+
+### v2.2.2 更新亮点
 - **多视角联合对齐引擎四步重构与提速 (`align_multiperspective.py`)**：
   - 引入基于有效音素余弦筛选的纯声学 `SimSeg` 分段校准、主视角清晰度分段归属、以及局部 `Δt` 窗口 Numba JIT (`nogil=True`) 检索与双视角并发执行；
   - 改为单次解码音频并按需切片计算 STFT 相干性，显著缩短多视角对齐耗时，原生输出视角 A / B 各自独立的 `.lrc` 与 `.srt` 时间轴。
@@ -64,10 +74,10 @@
 
 无需安装 Python 与 PyTorch，下载解压即用，已完整内置 1.26 GB 声学模型与 LoRA 适配器：
 
-- **CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.2.2-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
-- **CUDA GPU 版**（N 卡用户，速度极快，支持 4 GB+ 显存 FP16）：下载全部分卷（`FA-ASMR-v2.2.2-Windows-GPU.zip.001` 等）与 `merge_split_gpu_zip.bat` 至同一文件夹，双击该批处理自动合并后解压运行 `运行FA-ASMR.bat`。
+- **CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.2.3-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
+- **CUDA GPU 版**（N 卡用户，速度极快，支持 4 GB+ 显存 FP16）：下载全部分卷（`FA-ASMR-v2.2.3-Windows-GPU.zip.001` 等）与 `merge_split_gpu_zip.bat` 至同一文件夹，双击该批处理自动合并后解压运行 `运行FA-ASMR.bat`。
 
-下载地址：[GitHub Releases (v2.2.2)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+下载地址：[GitHub Releases (v2.2.3)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
 > 以下为源码运行方式，适合开发者或需要自行修改代码的用户。
 

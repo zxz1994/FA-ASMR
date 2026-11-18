@@ -54,6 +54,7 @@ type=3 且 pron 为空的 ``っ``（形如 ``...って、答は``）是唯一的
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Sequence, Tuple
 
 # ── result_list 扩展字段名（全项目单一事实源）─────────────────────────────
@@ -96,6 +97,10 @@ PUNCT_CUT_INCLUDES_EMPTY_TEXT = False
 # 与 README 数据契约一致。
 _TEXT_TYPES = (1, 2, 3, 4, 5)
 
+# 前导开引号 / 开括号：必须强绑定到右侧后续词，不能作为句末标点切点或被吞入前一段尾部。
+OPEN_BRACKET_CHARS = frozenset("「『（([【《〈“‘")
+_PROLONG_ONLY_RE = re.compile(r"^[ー～〜~]+$")
+
 
 # ── 底层判定 ────────────────────────────────────────────────────────────
 
@@ -119,17 +124,58 @@ def is_newline(item: Dict[str, Any]) -> bool:
     return item.get("orig", "") == "\n"
 
 
+def is_open_bracket(item: Dict[str, Any]) -> bool:
+    """该项是否为前导开引号 / 开括号（如「『（等）。"""
+    orig = (item.get("orig", "") or "").strip()
+    return bool(orig) and all(c in OPEN_BRACKET_CHARS for c in orig)
+
+
+def is_prolong_mark(item: Dict[str, Any]) -> bool:
+    """该项是否为单纯的词内延音符号（如 〜 / ～ / ~ / ー）。"""
+    orig = item.get("orig", "") or ""
+    return bool(orig) and bool(_PROLONG_ONLY_RE.match(orig))
+
+
+_VOICING_MARKS = frozenset("゛゜\u309b\u309c\u3099\u309a")
+
+
+def is_voicing_mark(item: Dict[str, Any]) -> bool:
+    """该项是否为由独立浊音符（゛/゜）归一化后映射来的词内浊点符号。"""
+    src = item.get(F.SRC)
+    if src is not None:
+        s = src.strip()
+        return bool(s) and all(c in _VOICING_MARKS for c in s)
+    orig = item.get("orig", "") or ""
+    return bool(orig) and all(c in _VOICING_MARKS for c in orig)
+
+
+def src_text(item: Dict[str, Any]) -> str:
+    """取 token 最终显示用的原文子串（精确区分 `_src == ""` 与未挂 `_src`）。"""
+    src = item.get(F.SRC)
+    return src if src is not None else item.get("orig", "")
+
+
 def is_symbol(item: Dict[str, Any]) -> bool:
-    """该项是否为「被 tokenizer 丢弃的符号」。
+    """该项是否为「构成子句切分边界的符号」（含换行）。
 
-    判据刻意**不依赖任何字符表**：凡无发音、非空、非注音占位符的项都算。
-    这样不同台本用任何符号都能识别，不会「碰到特殊台本就不认」。
+    判据刻意**不依赖完整标点字符表**：凡无发音、非空、非注音占位符的项，
+    排除以下绝不应断句的元素后一律算符号边界：
+      - ``type 1..5`` 文本字（如无读音促音 ``っ`` in ``...って``）
+      - 前导开引号/开括号（``「『（([【《〈“‘``，应绑定右侧正文）
+      - 单纯词内延音符（``ー～〜~``，如 ``硬～い``）与词内浊点符（``゛゜``）
 
-    注意：换行也满足本判据（非空、无发音）。需要「符号但非换行」时用
-    ``is_punct_symbol``。
+    注意：换行也满足本判据。需要「符号但非换行」时用 ``is_punct_symbol``。
     """
     orig = item.get("orig", "")
-    return bool(orig) and not has_pron(item) and not is_ruby_placeholder(item)
+    if not orig or has_pron(item) or is_ruby_placeholder(item):
+        return False
+    if is_newline(item):
+        return True
+    if is_text_token(item) and not PUNCT_CUT_INCLUDES_EMPTY_TEXT:
+        return False
+    if is_open_bracket(item) or is_prolong_mark(item) or is_voicing_mark(item):
+        return False
+    return True
 
 
 def is_punct_symbol(item: Dict[str, Any]) -> bool:
