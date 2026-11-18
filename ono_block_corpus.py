@@ -13,6 +13,8 @@
 从 603 条变体枚举提炼而来。
 """
 
+import re
+
 # 词根表（按类别）
 _ROOTS = frozenset("""
     あそこ あたし あちら あなた あの あら ありがと ある
@@ -26,7 +28,7 @@ _ROOTS = frozenset("""
     ください くにゅ くる くるくる けど こう こうして こうどう
     ここ ここから ここで ここに ここまで こしょ こしょこしょ こす
     こすこす こちら こと この このまま これ これが これは
-    こんな こんなに ご ごきゅ ごご ごし ごぜん ごはん
+    こんな こんなに ご ごお ごきゅ ごご ごし ごぜん ごはん
     ごはんっ ごめん ごろ さあ さぁ さわ さわさわ さん しぃ
     しこ しこしこ しこしこっ しこっ しごと した して しまう
     しゅき じぶん じゃない じゅう すき すきすき すこし すご
@@ -58,6 +60,7 @@ _ROOTS = frozenset("""
 
 
 _TAIL = frozenset("っッー～~゛゜ﾞﾟぁぃぅぇぉァィゥェォんン")
+_PROLONG_RE = re.compile(r"[ー～〜~]+")
 
 
 def is_blocked(text: str) -> bool:
@@ -67,21 +70,29 @@ def is_blocked(text: str) -> bool:
       长度 1~2 的词根：【整串相等】或【词根 + 纯尾记号】才拦
         （いいっ 含 いい+っ → 拦；いいぞ 含 いい+ぞ → 拦）
       长度 >= 3 的词根：【含它】就拦
+    同时对剥除词内波浪号/长音符后的紧凑串做对称校验，防止「に～～い」「さ～ん」「よ～ん」等漏网。
     """
     # 实词词根（词根+尾记号也拦）
-    _REAL = {"もう", "はい", "ぎゅ", "いえ", "おう", "こう", "そう", "どう",
-             "いい"}
-    for r in _ROOTS:
-        if len(r) <= 2:
-            if text == r:
-                return True
-            # 实词词根 + 纯尾记号（いいっ / もうっ / はいっ / ぎゅ～～～）
-            if r in _REAL and text.startswith(r):
-                rest = text[len(r):]
-                if rest and all(c in _TAIL for c in rest):
+    _REAL = {
+        "もう", "はい", "ぎゅ", "いえ", "おう", "こう", "そう", "どう", "いい",
+        "いち", "にい", "にぃ", "さん", "よん", "ごお", "ろく", "なな", "はち",
+    }
+    compact = _PROLONG_RE.sub("", text)
+    candidates = (text,) if compact == text else (text, compact)
+    for cand in candidates:
+        if not cand:
+            continue
+        for r in _ROOTS:
+            if len(r) <= 2:
+                if cand == r:
                     return True
-        elif r in text:
-            return True
+                # 实词词根 + 纯尾记号（いいっ / もうっ / はいっ / ぎゅ～～～ / に～～いっ）
+                if r in _REAL and cand.startswith(r):
+                    rest = cand[len(r):]
+                    if rest and all(c in _TAIL for c in rest):
+                        return True
+            elif r in cand:
+                return True
     return False
 
 
