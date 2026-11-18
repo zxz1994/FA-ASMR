@@ -340,7 +340,9 @@ def compute_emission(waveform, sample_rate, device="auto", lora_path=None,
         # the accumulated valid emissions are only tens of MB for a full
         # track.  The CPU path keeps its original bounded-memory behavior.
         accumulate_on_device = (device.type == "cuda")
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.autocast(
+            device_type="cuda", dtype=torch.float16, enabled=(device.type == "cuda")
+        ):
             for start in range(0, total_samples, chunk_size):
                 end = min(start + chunk_size, total_samples)
                 keep_frames = math.ceil((end - start) / _HOP_SAMPLES)
@@ -355,7 +357,12 @@ def compute_emission(waveform, sample_rate, device="auto", lora_path=None,
                 local.append(valid if accumulate_on_device else valid.cpu())
                 del chunk_audio, emission_chunk, valid
         merged = torch.cat(local, dim=1)
-        return merged.cpu() if accumulate_on_device else merged
+        del local
+        res = merged.cpu() if accumulate_on_device else merged
+        del merged
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        return res
 
     def get_emission_stereo_pair(wf_L, wf_R):
         """左右声道各跑一遍前向，不打包成 batch=2。

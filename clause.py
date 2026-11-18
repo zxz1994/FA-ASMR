@@ -77,6 +77,7 @@ class F:
     CLAUSE_HEAD = "_clause_head"             # 该 token 是否为子句首
     CLAUSE_ONO = "_clause_ono"               # 所在子句是否为拟声
     INSERTED = "_inserted"                   # 该 "\n" 由算法插入（非台本原有）
+    NO_CLAUSE_CUT = "_no_clause_cut"         # 行内短实词顿号桥接：不在此标点处切分子句
 
 
 # ── 可调开关 ────────────────────────────────────────────────────────────
@@ -154,6 +155,8 @@ def is_clause_boundary(item: Dict[str, Any]) -> bool:
     """
     if is_newline(item):
         return True
+    if item.get(F.NO_CLAUSE_CUT):
+        return False
     return is_symbol(item)
 
 
@@ -168,9 +171,115 @@ def is_punct_cut_point(item: Dict[str, Any]) -> bool:
     """
     if is_newline(item):
         return False
+    if item.get(F.NO_CLAUSE_CUT):
+        return False
     if is_text_token(item) and not PUNCT_CUT_INCLUDES_EMPTY_TEXT:
         return False
     return is_symbol(item)
+
+
+def mark_short_comma_bridges(
+    result_list: Sequence[Dict[str, Any]],
+    max_merged_chars: int = 10,
+) -> int:
+    """标记行内被单个顿号（、/，）切开的短实词片段，使其不作为子句切点。
+
+    规则：
+    - 仅在同一行内、相邻两段仅由单个顿号（``、`` 或 ``，``）分隔、且说话人相同时触发；
+    - 合并后总字数 ``<= max_merged_chars``（默认 10 字）且整体非拟声词（``not is_easy_ono``）；
+    - 满足以下任一条件即桥接：
+      1) 左右两侧均为非拟声实词（如 ``ダメ、です``、``口の、中``、``早い、ですね``）；
+      2) 左侧为 1~2 字口吃前缀且右侧实词读音以其开头（如 ``ぃ、行ってらっしゃいませ``、``ち、ちが``）；
+      3) 左侧为 <=2 字实词且右侧为 <=3 字词尾（如 ``うる、さいっ``、``やめ、てっ``）。
+    """
+    try:
+        from ono_filter import is_easy_ono as _is_easy_ono
+    except Exception:
+        return 0
+
+    for it in result_list:
+        it.pop(F.NO_CLAUSE_CUT, None)
+
+    n = len(result_list)
+    raw_segs: List[Tuple[List[int], List[int], bool]] = []
+    cur_pron: List[int] = []
+    i = 0
+    while i < n:
+        it = result_list[i]
+        if is_newline(it) or is_symbol(it):
+            if cur_pron:
+                j = i
+                p_idxs: List[int] = []
+                saw_nl = False
+                while j < n and (is_newline(result_list[j]) or is_symbol(result_list[j])):
+                    if is_newline(result_list[j]):
+                        saw_nl = True
+                        j += 1
+                        break
+                    p_idxs.append(j)
+                    j += 1
+                raw_segs.append((cur_pron, p_idxs, saw_nl))
+                cur_pron = []
+                i = j
+                continue
+        elif has_pron(it):
+            cur_pron.append(i)
+        i += 1
+    if cur_pron:
+        raw_segs.append((cur_pron, [], False))
+
+    bridged = 0
+    acc_surf = ""
+    acc_pron = ""
+    acc_ono = True
+    for k in range(len(raw_segs) - 1):
+        c1, p_idxs, saw_nl = raw_segs[k]
+        c2, _, _ = raw_segs[k + 1]
+        s1_raw = "".join(result_list[x].get("orig", "") for x in c1)
+        p1_raw = "".join(str(result_list[x].get("pron", "")) for x in c1)
+        if not acc_surf:
+            acc_surf = s1_raw
+            acc_pron = p1_raw
+            acc_ono = bool(_is_easy_ono(s1_raw))
+
+        if saw_nl or not p_idxs:
+            acc_surf = ""
+            continue
+
+        punct_str = "".join(result_list[p].get("orig", "") for p in p_idxs)
+        if punct_str not in ("、", "，"):
+            acc_surf = ""
+            continue
+
+        spk1 = tuple(result_list[c1[0]].get(F.SPK, ())) if result_list[c1[0]].get(F.SPK) else ()
+        spk2 = tuple(result_list[c2[0]].get(F.SPK, ())) if result_list[c2[0]].get(F.SPK) else ()
+        if spk1 != spk2:
+            acc_surf = ""
+            continue
+
+        s2 = "".join(result_list[x].get("orig", "") for x in c2)
+        p2 = "".join(str(result_list[x].get("pron", "")) for x in c2)
+        ono2 = bool(_is_easy_ono(s2))
+        comb_surf = acc_surf + s2
+        if len(comb_surf) > max_merged_chars or _is_easy_ono(comb_surf):
+            acc_surf = ""
+            continue
+
+        both_sem = (not acc_ono) and (not ono2)
+        is_stutter = (1 <= len(acc_surf) <= 2 and not ono2 and bool(acc_pron) and p2.startswith(acc_pron))
+        is_split_word = (not acc_ono and len(acc_surf) <= 2 and len(s2) <= 3)
+
+        if both_sem or is_stutter or is_split_word:
+            for p in p_idxs:
+                result_list[p][F.NO_CLAUSE_CUT] = True
+            bridged += 1
+            acc_surf = comb_surf
+            acc_pron = acc_pron + p2
+            acc_ono = False
+        else:
+            acc_surf = ""
+
+    return bridged
 
 
 # ── 基于统一判据的子句切分 ──────────────────────────────────────────────

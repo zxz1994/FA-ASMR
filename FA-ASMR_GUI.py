@@ -8,7 +8,7 @@
 from __future__ import annotations
 from typing import Optional, Dict, Any
 
-import sys, os, io, re, time, threading
+import sys, os, io, re, time, threading, copy
 
 # ── windowed (console=False) 冻结模式下绑定标准流 ──────────────────────────
 # PyInstaller 的 windowed bootloader 会把 sys.stdout / sys.stderr 置为 None。
@@ -396,24 +396,36 @@ def build_standard_lrc(result_list):
     _flush()
 
     lines = []
+    active_max_end_cs = None
     for idx, (g_start, g_end, g_parts) in enumerate(groups):
         eff_end = g_end
-        if idx + 1 < len(groups):
-            next_start = groups[idx + 1][0]
-            cs_end = _lrc_time_to_cs(eff_end)
-            cs_next = _lrc_time_to_cs(next_start)
-            # 多说话人/多流交错时，若前一句结束晚于后一句起点，将空白结束标记截断至后一句起点，确保全局单调
-            if cs_end is not None and cs_next is not None and cs_end > cs_next:
-                eff_end = next_start
+        cs_start = _lrc_time_to_cs(g_start)
+        cs_end = _lrc_time_to_cs(eff_end)
+        cs_next = _lrc_time_to_cs(groups[idx + 1][0]) if idx + 1 < len(groups) else None
+
+        # 与 SRT 对齐最低 1.0s 驻留时长（仅当后续存在真实空白时补足，避免 0.12s 短句闪现即消失）
+        if cs_start is not None and (cs_end is None or cs_end < cs_start + 100):
+            target_cs = cs_start + 100
+            if cs_next is not None:
+                target_cs = min(target_cs, cs_next)
+            if cs_end is None or target_cs > cs_end:
+                cs_end = max(cs_start, target_cs)
+                eff_end = f"[{cs_end // 6000:02d}:{(cs_end // 100) % 60:02d}:{cs_end % 100:02d}]"
+
+        # 追踪跨行全局活跃最大结束时间，防止前一句仍在持续时因较短的嵌套插话先结束而提前输出空白清屏行
+        if cs_end is not None:
+            if active_max_end_cs is None or cs_end > active_max_end_cs:
+                active_max_end_cs = cs_end
+            clear_cs = max(cs_end, active_max_end_cs)
+            if cs_next is not None and clear_cs > cs_next:
+                clear_cs = cs_next
+            cs_end = clear_cs
+            eff_end = f"[{cs_end // 6000:02d}:{(cs_end // 100) % 60:02d}:{cs_end % 100:02d}]"
+
         lines.append(_fmt_line(g_start, eff_end, g_parts))
         if eff_end and eff_end != g_start:
-            # 仅当当前行结束与下一行开头存在真实声学停顿（或为全曲末行）时，输出空白下轴时间戳
-            has_gap = True
-            if idx + 1 < len(groups):
-                cs_eff = _lrc_time_to_cs(eff_end)
-                cs_nxt = _lrc_time_to_cs(groups[idx + 1][0])
-                if cs_eff is not None and cs_nxt is not None and cs_eff >= cs_nxt:
-                    has_gap = False
+            # 仅当所有已激活语句全部结束且下一行之前存在真实停顿（或为末行）时，输出空白下轴时间戳
+            has_gap = cs_next is None or (cs_end is not None and cs_end < cs_next)
             if has_gap:
                 t = _fmt_lrc_time(eff_end)
                 if t:
@@ -604,6 +616,7 @@ def _attach_source_spans(tokens, annotated_line, source_line, normalize_fn):
 
 
 def _release_gpu(ruby=None):
+    global _RUBY_ANNOTATOR
     try:
         import align
         align.clear_model_cache()
@@ -614,6 +627,12 @@ def _release_gpu(ruby=None):
             ruby.release_gpu()
         except Exception:
             pass
+    elif _RUBY_ANNOTATOR is not None:
+        try:
+            _RUBY_ANNOTATOR.release_gpu()
+        except Exception:
+            pass
+        _RUBY_ANNOTATOR = None
 
 
 def run_pipeline(
@@ -717,6 +736,13 @@ def run_pipeline(
         # 原文文本行（供 _src 还原）：剥离标记 + 内联假名清洗后的正文
         lines = _body_lines
         log(f"  ✨ 台本处理完成 ({len(lines)} 行)")
+
+        # 及时释放 yomikata dBert 显存（步骤 2~4 的声学对齐不再需要 dBert，同时保留 UniDic 单例供批处理复用）
+        if getattr(ruby, "_ann", None) is not None:
+            try:
+                ruby._ann.release_gpu()
+            except Exception:
+                pass
 
         log("[2/4] 🎵 解析音素与规范化...")
         result_list = []
@@ -824,7 +850,8 @@ def run_pipeline(
         src_idx = 0
         # 子句边界判据（已统一到 clause.py；ono_filter / merge_short /
         # resegment 全部引用同一份，此处也直接引 clause，少一层间接）
-        from clause import is_clause_boundary as _is_clause_boundary
+        from clause import is_clause_boundary as _is_clause_boundary, mark_short_comma_bridges as _mark_comma_bridges
+        _mark_comma_bridges(result_list)
         for i, item in enumerate(result_list):
             orig = item.get("orig", "")
             pron = item.get("pron", "")
@@ -990,147 +1017,150 @@ def run_pipeline(
                 _release_gpu(_ruby)
             return False, None, "对齐返回空结果"
 
-        for i, result in enumerate(alignment_results):
-            if i in token_to_index_map:
-                original_index = token_to_index_map[i]
-                result_list[original_index]["start"] = result["start"]
-                result_list[original_index]["end"] = result["end"]
+        def _finalize_post_rl(base_rl, align_res, side_label: str = ""):
+            rl = copy.deepcopy(base_rl)
+            for i, result in enumerate(align_res):
+                if i in token_to_index_map and not result.get("skipped") and "start" in result and "end" in result:
+                    original_index = token_to_index_map[i]
+                    rl[original_index]["start"] = result["start"]
+                    rl[original_index]["end"] = result["end"]
 
-        independent_rl = None
-        if enable_multi_order and len(_stream_clause_lists) > 1:
-            result_list, independent_rl = post_process_and_merge_streams(
-                result_list=result_list,
-                alignment_results=alignment_results,
-                token_to_index_map=token_to_index_map,
-                stream_clause_lists=_stream_clause_lists,
-                enable_ono_gate=enable_ono_gate,
-                enable_resegment=enable_resegment,
-                enable_merge_short=enable_merge_short,
-                merge_short_chars=merge_short_chars,
-                merge_short_gap=merge_short_gap,
-                merge_ono_chars=merge_ono_chars,
-                merge_ono_gap=merge_ono_gap,
-                log_callback=log,
-                return_independent_rl=True,
-            )
-        else:
-            if enable_multi_order and enable_ono_gate:
-                try:
-                    apply_skipped_ono_marks(result_list, alignment_results, token_to_index_map)
-                except Exception:
-                    pass
+            ind_rl = None
+            if enable_multi_order and len(_stream_clause_lists) > 1:
+                rl, ind_rl = post_process_and_merge_streams(
+                    result_list=rl,
+                    alignment_results=align_res,
+                    token_to_index_map=token_to_index_map,
+                    stream_clause_lists=_stream_clause_lists,
+                    enable_ono_gate=enable_ono_gate,
+                    enable_resegment=enable_resegment,
+                    enable_merge_short=enable_merge_short,
+                    merge_short_chars=merge_short_chars,
+                    merge_short_gap=merge_short_gap,
+                    merge_ono_chars=merge_ono_chars,
+                    merge_ono_gap=merge_ono_gap,
+                    log_callback=log,
+                    return_independent_rl=True,
+                )
+            else:
+                if enable_multi_order and enable_ono_gate:
+                    try:
+                        apply_skipped_ono_marks(rl, align_res, token_to_index_map)
+                    except Exception:
+                        pass
 
-            # ---- 拟声错位处理 · 阶段一【标记】----------------------------
-            # 跑结构判据给可疑拟声子句打 `_ono_mark`，**一个 token 都不删**。
-            # 数据保持完整，后续 resegment / 短句合并才能切出真实的最终行结构；
-            # 决策放到阶段三、在最终行结构上一次性做（见下方 decide_ono_deletions）。
-            if enable_ono_gate:
-                try:
-                    from ono_filter import mark_ono_candidates as _ono_mark
-                    _ono_mark(
-                        result_list=result_list,
-                        alignment_results=alignment_results,
-                        token_to_index_map=token_to_index_map,
-                        log_callback=log,
-                    )
-                except Exception as _e:
-                    log(f"  ⚠ 拟声标记跳过: {_e}")
+                # ---- 拟声错位处理 · 阶段一【标记】----------------------------
+                # 跑结构判据给可疑拟声子句打 `_ono_mark`，**一个 token 都不删**。
+                # 数据保持完整，后续 resegment / 短句合并才能切出真实的最终行结构；
+                # 决策放到阶段三、在最终行结构上一次性做（见下方 decide_ono_deletions）。
+                if enable_ono_gate:
+                    try:
+                        from ono_filter import mark_ono_candidates as _ono_mark
+                        _ono_mark(
+                            result_list=rl,
+                            alignment_results=align_res,
+                            token_to_index_map=token_to_index_map,
+                            log_callback=log,
+                        )
+                    except Exception as _e:
+                        log(f"  ⚠ 拟声标记跳过: {_e}")
 
-            # ---- 标点驱动重分段（候选=标点，证据=两侧 CTC blank 间隔；标点保留） ----
-            if enable_resegment:
-                try:
-                    from resegment import apply_punctuation_resegment as _reseg
-                    # 用全量 token 的停顿证据定行边界。此时还没有任何 token 被删
-                    # （阶段一只打标记），所以这就是真实的朗读结构。
-                    _rl_time = {}
-                    for _k, _r in enumerate(alignment_results):
-                        _ri = token_to_index_map.get(_k)
-                        if _ri is not None:
-                            _rl_time[_ri] = (float(_r.get("original_start", 0.0)),
-                                             float(_r.get("original_end", 0.0)))
-                    _n_before = sum(1 for _it in result_list if _it.get("orig") == "\n") + 1
-                    result_list = _reseg(result_list, _rl_time, frame_sec=0.02, thr_frames=50, max_line_chars=22)
-                    _n_after = sum(1 for _it in result_list if _it.get("orig") == "\n") + 1
-                    log(f"  ✨ 标点重分段: {_n_before} → {_n_after} 行（标点保留）")
-                except Exception as _e:
-                    log(f"  ⚠ 标点重分段跳过: {_e}")
+                # ---- 标点驱动重分段（候选=标点，证据=两侧 CTC blank 间隔；标点保留） ----
+                if enable_resegment:
+                    try:
+                        from resegment import apply_punctuation_resegment as _reseg
+                        _rl_time = {}
+                        for _k, _r in enumerate(align_res):
+                            _ri = token_to_index_map.get(_k)
+                            if _ri is not None:
+                                _rl_time[_ri] = (float(_r.get("original_start", 0.0)),
+                                                 float(_r.get("original_end", 0.0)))
+                        _n_before = sum(1 for _it in rl if _it.get("orig") == "\n") + 1
+                        rl = _reseg(rl, _rl_time, frame_sec=0.02, thr_frames=50, max_line_chars=22)
+                        _n_after = sum(1 for _it in rl if _it.get("orig") == "\n") + 1
+                        _pfx = f"[{side_label}] " if side_label else ""
+                        log(f"  ✨ {_pfx}标点重分段: {_n_before} → {_n_after} 行（标点保留）")
+                    except Exception as _e:
+                        log(f"  ⚠ 标点重分段跳过: {_e}")
 
-            # ---- 短句合并：把 resegment 切碎的相邻短句重新合并 ----
-            # 合并条件：前行可见字符数 <= max_chars 且与下一行起点间隔 <= max_gap。
-            # 不区分台本 \n 与 resegment \n —— 台本按语义断行、朗读却是连读的，
-            # 被行界切开的两半本是同一口气，硬拆会让后半的拟声被判成「行首问题」。
-            if enable_merge_short:
-                try:
-                    from merge_short import merge_short_lines as _merge, count_inserted_breaks as _cb
-                    _nb = _cb(result_list)
-                    result_list = _merge(result_list, max_chars=merge_short_chars,
-                                         max_gap=merge_short_gap,
-                                         ono_max_chars=merge_ono_chars,
-                                         ono_max_gap=merge_ono_gap)
-                    _na = _cb(result_list)
-                    if _nb != _na:
-                        log(f"  ✨ 短句合并: 合并 {_nb - _na} 处碎句")
-                except Exception as _e:
-                    log(f"  ⚠ 短句合并跳过: {_e}")
+                # ---- 短句合并：把 resegment 切碎的相邻短句重新合并 ----
+                if enable_merge_short:
+                    try:
+                        from merge_short import merge_short_lines as _merge, count_inserted_breaks as _cb
+                        _nb = _cb(rl)
+                        rl = _merge(rl, max_chars=merge_short_chars,
+                                    max_gap=merge_short_gap,
+                                    ono_max_chars=merge_ono_chars,
+                                    ono_max_gap=merge_ono_gap)
+                        _na = _cb(rl)
+                        if _nb != _na:
+                            _pfx = f"[{side_label}] " if side_label else ""
+                            log(f"  ✨ {_pfx}短句合并: 合并 {_nb - _na} 处碎句")
+                    except Exception as _e:
+                        log(f"  ⚠ 短句合并跳过: {_e}")
 
-            # ---- 拟声错位处理 · 阶段三【决策】----------------------------
-            # 最终字幕行结构已定，此刻才决定删哪些标记过的拟声，并一次性应用。
-            # 规则见 ono_filter.decide_ono_deletions 的文档。
-            if enable_ono_gate:
-                try:
-                    from ono_filter import decide_ono_deletions as _ono_decide
-                    _ono_decide(result_list=result_list, log_callback=log)
-                except Exception as _e:
-                    log(f"  ⚠ 拟声决策跳过: {_e}")
+                # ---- 拟声错位处理 · 阶段三【决策】----------------------------
+                if enable_ono_gate:
+                    try:
+                        from ono_filter import decide_ono_deletions as _ono_decide
+                        _ono_decide(result_list=rl, log_callback=log)
+                    except Exception as _e:
+                        log(f"  ⚠ 拟声决策跳过: {_e}")
 
-            for i in range(len(result_list)):
-                item = result_list[i]
-                # 被拟声守门删除的 token：不借时间，保持无时间状态以从 LRC 剔除
-                if item.get(F.ONO_DROPPED):
-                    continue
-                if "start" not in item and item.get("type", 0) in [1, 2, 3, 4, 5]:
-                    # 行内有界时间借用：绝不越过换行符 \n 跨行偷时间
-                    found = False
-                    # 1. 优先在当前行内向左寻找前一个有时间的 item
-                    for j in range(i - 1, -1, -1):
-                        if result_list[j].get("type") == 0 and result_list[j].get("orig") == "\n":
-                            break
-                        # 不借被删拟声 token 的时间（本就不可靠）
-                        if result_list[j].get(F.ONO_DROPPED):
-                            continue
-                        if "start" in result_list[j]:
-                            item["start"] = result_list[j]["start"]
-                            item["end"] = result_list[j]["end"]
-                            found = True
-                            break
-                    # 2. 若左侧已至行首，在当前行内向右寻找第一个有时间的 item
-                    if not found:
-                        for j in range(i + 1, len(result_list)):
-                            if result_list[j].get("type") == 0 and result_list[j].get("orig") == "\n":
+                for i in range(len(rl)):
+                    item = rl[i]
+                    if item.get(F.ONO_DROPPED):
+                        continue
+                    if "start" not in item and item.get("type", 0) in [1, 2, 3, 4, 5]:
+                        found = False
+                        for j in range(i - 1, -1, -1):
+                            if rl[j].get("type") == 0 and rl[j].get("orig") == "\n":
                                 break
-                            if result_list[j].get(F.ONO_DROPPED):
+                            if rl[j].get(F.ONO_DROPPED):
                                 continue
-                            if "start" in result_list[j]:
-                                item["start"] = result_list[j]["start"]
-                                item["end"] = result_list[j]["end"]
+                            if "start" in rl[j]:
+                                item["start"] = rl[j]["start"]
+                                item["end"] = rl[j]["end"]
+                                found = True
                                 break
+                        if not found:
+                            for j in range(i + 1, len(rl)):
+                                if rl[j].get("type") == 0 and rl[j].get("orig") == "\n":
+                                    break
+                                if rl[j].get(F.ONO_DROPPED):
+                                    continue
+                                if "start" in rl[j]:
+                                    item["start"] = rl[j]["start"]
+                                    item["end"] = rl[j]["end"]
+                                    break
+            return rl, ind_rl
 
         log("[4/4] 📜 组装标准 LRC 与 SRT 字幕...")
-        target_rl_for_srt = independent_rl if independent_rl is not None else result_list
         if audio_path_b and _mp_meta is not None:
             from align_multiperspective import project_result_list_to_perspective
             _spk_pref = _mp_meta.get("spk_persp_pref")
 
+            if "flat_A" in _mp_meta and "flat_B" in _mp_meta:
+                _rl_lrc_A, _rl_ind_A = _finalize_post_rl(result_list, _mp_meta["flat_A"], side_label="视角A")
+                _rl_lrc_B, _rl_ind_B = _finalize_post_rl(result_list, _mp_meta["flat_B"], side_label="视角B")
+                _target_ind_A = _rl_ind_A if _rl_ind_A is not None else _rl_lrc_A
+                _target_ind_B = _rl_ind_B if _rl_ind_B is not None else _rl_lrc_B
+            else:
+                _rl_lrc_A, _rl_ind_raw = _finalize_post_rl(result_list, alignment_results)
+                _rl_lrc_B = _rl_lrc_A
+                _target_ind_A = _rl_ind_raw if _rl_ind_raw is not None else _rl_lrc_A
+                _target_ind_B = _target_ind_A
+
             # 1. LRC 视轨生成（水平归并）
             rl_A = project_result_list_to_perspective(
-                result_list,
+                _rl_lrc_A,
                 _mp_meta["u_A_st_sec"],
                 _mp_meta["dur_A_sec"],
                 perspective_side="A",
                 spk_persp_pref=_spk_pref,
             )
             rl_B = project_result_list_to_perspective(
-                result_list,
+                _rl_lrc_B,
                 _mp_meta["u_B_st_sec"],
                 _mp_meta["dur_B_sec"],
                 perspective_side="B",
@@ -1145,14 +1175,14 @@ def run_pipeline(
 
             # 2. SRT 视轨生成（多角色完全自治独立流）
             rl_indep_A = project_result_list_to_perspective(
-                target_rl_for_srt,
+                _target_ind_A,
                 _mp_meta["u_A_st_sec"],
                 _mp_meta["dur_A_sec"],
                 perspective_side="A",
                 spk_persp_pref=_spk_pref,
             )
             rl_indep_B = project_result_list_to_perspective(
-                target_rl_for_srt,
+                _target_ind_B,
                 _mp_meta["u_B_st_sec"],
                 _mp_meta["dur_B_sec"],
                 perspective_side="B",
@@ -1188,6 +1218,8 @@ def run_pipeline(
             log(f"  🎯 视角 A: {lrc_path} ({n_lines_a} 行) | {srt_path} ({n_cues_a} 条独立字幕)")
             log(f"  🎯 视角 B: {lrc_path_b} ({n_lines_b} 行) | {srt_path_b} ({n_cues_b} 条独立字幕)")
         else:
+            result_list, independent_rl = _finalize_post_rl(result_list, alignment_results)
+            target_rl_for_srt = independent_rl if independent_rl is not None else result_list
             # 1. 组装 LRC 字幕
             lrc_content = build_standard_lrc(result_list)
             if line_end_extend > 0:

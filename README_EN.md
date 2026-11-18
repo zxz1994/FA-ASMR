@@ -11,7 +11,21 @@
 
 ---
 
-## 1. Core Advantages & Major Updates (v2.1.0)
+## 1. Core Advantages & Updates (v2.2.0)
+
+### 🆕 What's New in v2.2.0
+- **4-Stage Multi-Perspective Engine Rewrite & Acceleration (`align_multiperspective.py`)**:
+  - Introduces phoneme-filtered acoustic `SimSeg` calibration, home-perspective segment scoring, Numba JIT (`nogil=True`) local `Δt` window search, and concurrent dual-perspective alignment;
+  - Uses single-pass audio decoding with lazy sliced STFT coherence checks, substantially reducing runtime while projecting independent A/B native timelines to `.lrc` and `.srt`.
+- **Multi-Speaker Accuracy & Inline Onomatopoeia Preservation (`align_multispeaker.py`)**:
+  - Backports stereo STFT solo-speech masking (`_AudioSoloChecker`) and collision window repair (`_refine_solo_collisions`) to distinguish genuine overlapping dialogue from false claims;
+  - Preserves inline sandwiched onomatopoeia between semantic clauses in the same line without dropping mid-sentence words, while still pruning leading/trailing noise and protecting short comma-split word suffixes.
+- **Cross-Mode Segmentation, FP16 Inference & Output Polish (`clause.py`, `align_model.py`, `merge_short.py`, `FA-ASMR_GUI.py`)**:
+  - **Short Comma-Bridge Clause Grouping**: Short semantic clauses joined by a single Japanese comma `、` within the same line (up to 10 characters, e.g., `ダメ、です`) are bridged together during alignment across Modes 1/2/3 to prevent short-word early drift across long pauses;
+  - **CUDA FP16 Inference**: Enables `torch.autocast` (`float16`) on CUDA and releases `dBert` VRAM immediately after furigana annotation;
+  - **Subtitle Readability Polish**: Aligns LRC minimum 1.0s display duration with overlap-safe clearing and inserts thin spaces when merging unpunctuated short lines.
+
+### Core Architecture Highlights (v2.1.0+)
 
 When subtitle makers and translators already possess official scripts (as is standard for DLsite/DMM voice dramas), using general-purpose ASR models like Whisper introduces critical issues: missed whispers, misheard character names, and bloated 10–20 second monolithic subtitle blocks. 
 
@@ -53,10 +67,10 @@ FA-ASMR V2 utilizes a **100% pure acoustic forced alignment architecture** (Meta
 
 No Python or PyTorch installation required. Unzip and run — the 1.26 GB acoustic model and LoRA adapter are bundled inside:
 
-- **CPU edition** (works on any PC): download `FA-ASMR-v2.1.0-Windows-CPU.zip`, extract, then double-click `运行FA-ASMR.bat`;
-- **CUDA GPU edition** (fast on NVIDIA GPUs): download all split parts plus `merge_split_gpu_zip.bat` into one folder, then double-click the batch file to merge and extract automatically.
+- **CPU edition** (works on any PC): download `FA-ASMR-v2.2.0-Windows-CPU.zip`, extract, then double-click `运行FA-ASMR.bat`;
+- **CUDA GPU / FP16 Acceleration**: Install CUDA PyTorch per section `2.1` below to run from source with GPU + FP16 support.
 
-Download: [GitHub Releases (v2.1.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+Download: [GitHub Releases (v2.2.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
 > The section below covers running from source, intended for developers or users who need to modify the code.
 

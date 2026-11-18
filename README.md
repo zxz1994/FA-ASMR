@@ -10,7 +10,21 @@
 
 ---
 
-## 一、核心优势与重大升级 (v2.1.0)
+## 一、核心优势与版本更新 (v2.2.0)
+
+### 🆕 v2.2.0 更新亮点
+- **多视角联合对齐引擎四步重构与提速 (`align_multiperspective.py`)**：
+  - 引入基于有效音素余弦筛选的纯声学 `SimSeg` 分段校准、主视角清晰度分段归属、以及局部 `Δt` 窗口 Numba JIT (`nogil=True`) 检索与双视角并发执行；
+  - 改为单次解码音频并按需切片计算 STFT 相干性，显著缩短多视角对齐耗时，原生输出视角 A / B 各自独立的 `.lrc` 与 `.srt` 时间轴。
+- **多人模式精度与句中拟声护栏升级 (`align_multispeaker.py`)**：
+  - 移植基于双声道 STFT 相干性的单人说话遮罩（`_AudioSoloChecker`）与碰撞窗口重对齐修复（`_refine_solo_collisions`），区分真实双人重叠与单人抢词；
+  - 新增**句中夹心拟声保护**与**拆分短实词后缀保护**，同句实词中间夹着的拟声不再被挖空不显示，行首/行尾杂音保持干净剔除。
+- **全模式通用切分、推理与字幕优化 (`clause.py`, `align_model.py`, `merge_short.py`, `FA-ASMR_GUI.py`)**：
+  - **短实词顿号桥接**：同一行内被单个顿号 `、` 隔开的短实词（累计 10 字以内，如 `ダメ、です`）与口吃前缀统一保持连贯对齐，显著减少长停顿下极短实词抢跑错位（Mode 1 / 2 / 3 均生效）；
+  - **CUDA FP16 混合精度推理**：CUDA 推理默认启用 `float16` `autocast` 并在注音阶段后及时释放 `dBert` 显存；
+  - **LRC / SRT 输出观感改进**：LRC 补齐 1.0 秒最短驻留并避免嵌套插话提前清屏；无标点短句跨行合并自动补充半角空格分隔。
+
+### 核心能力概览 (v2.1.0+)
 
 在拥有官方台本的 ASMR 音声制作与汉化工作流中，传统 Whisper 等大模型盲听转录常存在弱音漏句、专有名词错写及十几秒巨型长轴粘连等痛点。FA-ASMR 采用纯声学物理强制对齐路线，并在最新版本中实现了架构级重构与升级：
 
@@ -50,10 +64,10 @@
 
 无需安装 Python 与 PyTorch，下载解压即用，已完整内置 1.26 GB 声学模型与 LoRA 适配器：
 
-- **CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.1.0-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
-- **CUDA GPU 版**（N 卡用户，速度极快）：下载全部分卷与 `merge_split_gpu_zip.bat` 至同一文件夹，双击该批处理自动合并解压。
+- **CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.2.0-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
+- **CUDA GPU 源码/扩展说明**：如需 N 卡极速 GPU / FP16 推理，请按下方 `2.1` 安装 CUDA 版 PyTorch 从源码运行。
 
-下载地址：[GitHub Releases (v2.1.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+下载地址：[GitHub Releases (v2.2.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
 > 以下为源码运行方式，适合开发者或需要自行修改代码的用户。
 

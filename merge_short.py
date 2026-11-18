@@ -43,6 +43,12 @@ _EXPRESSIVE_END_CHARS = set("♪♡♥☆★")
 _ELLIPSIS_CHARS = set("…‥.―—")
 _WEAK_COMMA_CHARS = set("、，,・")
 
+# 跨行合并替换内部的 \n 时，仅当左右均为实词/句子且不紧邻这些符号才插半角空格，
+# 既修复无标点短句直接粘连（如「お疲れ様布団」→「お疲れ様 布団」），又保留「、」「……」「（）」紧排。
+_NO_SPACE_AFTER = set("、，,・…‥.―—「『（([【《〈“‘」』）)]】》〉”’")
+_NO_SPACE_BEFORE = set("、。！？!?,，.・…‥」』）)]】》〉”’ーっゃゅょゎ~～")
+_RUBY_SURFACE_RE = re.compile(r"\{([^|]+)\|[^}]+\}")
+
 
 def _visible_chars(result_list: List[Dict[str, Any]], start: int, end: int) -> int:
     """[start,end) 区间的【字数】—— 每个子句取其 `_kana_n`，只算一次。"""
@@ -422,13 +428,90 @@ def merge_short_lines(
             cur_easy = both_easy
             i += 1
 
-        # 输出本行：区间内的 \n 一律去掉（合并后不再需要中间行界）
-        out.extend(it for it in result_list[cur_start:cur_end]
-                   if it.get("orig") != "\n")
+        # 输出本行：将合并区间内部原有的 \n 去掉，必要时补半角空格避免无标点短句粘连
+        _append_merged_line_tokens(out, result_list[cur_start:cur_end])
         out.append({"orig": "\n", "type": 0, "pron": "", F.INSERTED: True})
         i += 1
 
     return out
+
+
+def _visible_surface(item: Dict[str, Any]) -> str:
+    """提取 token 在最终字幕里的可见文本（展开 ruby 注音、忽略占位与已删项）。"""
+    if item.get(F.ONO_DROPPED) or item.get(F.RUBY_PLACEHOLDER):
+        return ""
+    raw = str(item.get(F.SRC, item.get("orig", "")) or "")
+    if not raw or raw == "\n":
+        return ""
+    return _RUBY_SURFACE_RE.sub(r"\1", raw)
+
+
+def _make_join_space_token(
+    left_tokens: List[Dict[str, Any]],
+    right_tokens: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """判断两个相邻句段合并成同一字幕行时是否需要插入半角空格分隔符。"""
+    last_vis_item: Optional[Dict[str, Any]] = None
+    last_vis_ch = ""
+    for it in reversed(left_tokens):
+        if it.get("orig") == "\n":
+            continue
+        surf = _visible_surface(it)
+        if surf:
+            last_vis_item = it
+            last_vis_ch = surf[-1]
+            break
+
+    if not last_vis_ch or last_vis_ch.isspace() or last_vis_ch in _NO_SPACE_AFTER:
+        return None
+
+    next_ch = ""
+    for it in right_tokens:
+        if it.get("orig") == "\n":
+            continue
+        surf = _visible_surface(it)
+        if surf:
+            next_ch = surf[0]
+            break
+
+    if not next_ch or next_ch.isspace() or next_ch in _NO_SPACE_BEFORE:
+        return None
+
+    space_tok: Dict[str, Any] = {
+        "orig": " ",
+        "type": 0,
+        "pron": "",
+        F.INSERTED: True,
+    }
+    if last_vis_item is not None and last_vis_item.get(F.SPK):
+        space_tok[F.SPK] = last_vis_item[F.SPK]
+    return space_tok
+
+
+def append_tokens_with_space(
+    dst: List[Dict[str, Any]],
+    next_tokens: List[Dict[str, Any]],
+) -> None:
+    """将下一句段的 token 列表并入 dst；若衔接处无分隔标点则自动补一个半角空格。"""
+    sp = _make_join_space_token(dst, next_tokens)
+    if sp is not None:
+        dst.append(sp)
+    dst.extend(next_tokens)
+
+
+def _append_merged_line_tokens(
+    out: List[Dict[str, Any]],
+    line_tokens: List[Dict[str, Any]],
+) -> None:
+    """把已合并为单行的 token 序列写入 out；原内部换行在无逗号/省略号分隔时补半角空格。"""
+    n_tok = len(line_tokens)
+    for idx, it in enumerate(line_tokens):
+        if it.get("orig") != "\n":
+            out.append(it)
+            continue
+        sp = _make_join_space_token(out, line_tokens[idx + 1:n_tok])
+        if sp is not None:
+            out.append(sp)
 
 
 def count_inserted_breaks(result_list: List[Dict[str, Any]]) -> int:
