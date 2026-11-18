@@ -642,7 +642,7 @@ def run_pipeline(
     log_callback,
     progress_callback,
     dev="auto",
-    vram_chunk=6000,
+    vram_chunk=3000,
     persist_gpu=False,
     line_end_extend=0.0,
     enable_silence_snap=True,

@@ -61,19 +61,19 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "FA-ASMR · Forced Alignment Studio",
     },
     "banner_badge": {
-        "zh": "FA-ASMR V2",
-        "ja": "FA-ASMR V2",
-        "en": "FA-ASMR V2",
+        "zh": "v2.2.1",
+        "ja": "v2.2.1",
+        "en": "v2.2.1",
     },
     "banner_title": {
-        "zh": "音声物理声学强制对齐工具",
-        "ja": "音声音響物理強制アライメントツール",
-        "en": "Acoustic Forced Alignment Tool",
+        "zh": "FA-ASMR",
+        "ja": "FA-ASMR",
+        "en": "FA-ASMR",
     },
     "banner_subtitle": {
-        "zh": "音声强制对齐工作台   ·   精确生成 LRC 与 SRT 字幕",
-        "ja": "音声強制アライメント   ·   高精度 LRC / SRT 字幕生成",
-        "en": "Forced Alignment Studio   ·   Precision LRC & SRT Subtitles",
+        "zh": "高精度 LRC / SRT 字幕生成",
+        "ja": "高精度 LRC / SRT 字幕生成",
+        "en": "Precision LRC & SRT Subtitles",
     },
     "device_cuda": {
         "zh": "●  CUDA 加速",

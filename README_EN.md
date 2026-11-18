@@ -11,9 +11,9 @@
 
 ---
 
-## 1. Core Advantages & Updates (v2.2.0)
+## 1. Core Advantages & Updates (v2.2.1)
 
-### 🆕 What's New in v2.2.0
+### 🆕 What's New in v2.2.1
 - **4-Stage Multi-Perspective Engine Rewrite & Acceleration (`align_multiperspective.py`)**:
   - Introduces phoneme-filtered acoustic `SimSeg` calibration, home-perspective segment scoring, Numba JIT (`nogil=True`) local `Δt` window search, and concurrent dual-perspective alignment;
   - Uses single-pass audio decoding with lazy sliced STFT coherence checks, substantially reducing runtime while projecting independent A/B native timelines to `.lrc` and `.srt`.
@@ -22,7 +22,7 @@
   - Preserves inline sandwiched onomatopoeia between semantic clauses in the same line without dropping mid-sentence words, while still pruning leading/trailing noise and protecting short comma-split word suffixes.
 - **Cross-Mode Segmentation, FP16 Inference & Output Polish (`clause.py`, `align_model.py`, `merge_short.py`, `FA-ASMR_GUI.py`)**:
   - **Short Comma-Bridge Clause Grouping**: Short semantic clauses joined by a single Japanese comma `、` within the same line (up to 10 characters, e.g., `ダメ、です`) are bridged together during alignment across Modes 1/2/3 to prevent short-word early drift across long pauses;
-  - **CUDA FP16 Inference**: Enables `torch.autocast` (`float16`) on CUDA and releases `dBert` VRAM immediately after furigana annotation;
+  - **CUDA FP16 Inference & Low VRAM Footprint**: Enables `torch.autocast` (`float16`) on CUDA, releases `dBert` VRAM immediately after furigana annotation, and standardizes on the optimal `3000`-frame chunk size (redundant UI chunk selector removed). Measured peak reserved VRAM across Modes 1/2/3 is ~`3.74 GB` (~`2.59 GB` allocated), fitting 4 GB+ GPUs out of the box;
   - **Subtitle Readability Polish**: Aligns LRC minimum 1.0s display duration with overlap-safe clearing and inserts thin spaces when merging unpunctuated short lines.
 
 ### Core Architecture Highlights (v2.1.0+)
@@ -67,10 +67,10 @@ FA-ASMR V2 utilizes a **100% pure acoustic forced alignment architecture** (Meta
 
 No Python or PyTorch installation required. Unzip and run — the 1.26 GB acoustic model and LoRA adapter are bundled inside:
 
-- **CPU edition** (works on any PC): download `FA-ASMR-v2.2.0-Windows-CPU.zip`, extract, then double-click `运行FA-ASMR.bat`;
+- **CPU edition** (works on any PC): download `FA-ASMR-v2.2.1-Windows-CPU.zip`, extract, then double-click `运行FA-ASMR.bat`;
 - **CUDA GPU / FP16 Acceleration**: Install CUDA PyTorch per section `2.1` below to run from source with GPU + FP16 support.
 
-Download: [GitHub Releases (v2.2.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+Download: [GitHub Releases (v2.2.1)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
 > The section below covers running from source, intended for developers or users who need to modify the code.
 
@@ -127,8 +127,7 @@ pip install --no-deps yomikata
      - *01 Standard Monotonic*: Ideal for solo voice acting and single audio tracks.
      - *02 Multi-Speaker / Reordered*: Handles overlapping speech, multi-track mixing, and staggered script dialogue (script requires speaker annotations).
      - *03 Multi-Perspective*: Operates atop multi-speaker engine for dual-perspective recordings, prioritizing acoustic-clear channels and exporting independent timelines.
-   - **Device**: Select `cuda` (GPU) or `cpu`.
-   - **VRAM Chunk**: Lower to 3000–6000 frames if running on lower VRAM GPUs to prevent OOM.
+   - **Device**: Select `cuda` (GPU) or `cpu`. GPU mode uses optimal 3000-frame chunking + FP16 (~`3.74 GB` peak reserved VRAM, compatible with 4 GB+ GPUs); CPU mode automatically caps chunks at 2000 frames with INT8 dynamic quantization.
    - **Line End Extension**: Adds a small natural delay to sentence end timestamps for more comfortable reading.
    - **Ono Gate**: Enable to prune stretched/distorted acting onomatopoeia.
 

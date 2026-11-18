@@ -654,7 +654,7 @@ def extract_acoustic_context(
     audio_file_path: str | Path,
     lora_path: Optional[str | Path] = None,
     device: str = "auto",
-    chunk_frames: int = 6000,
+    chunk_frames: int = 3000,
 ) -> Dict[str, Any]:
     """提取一次双声道发射矩阵、逐帧 RMS、静音掩码与句首静音保护数组，供多流复用。"""
     bundle = torchaudio.pipelines.MMS_FA

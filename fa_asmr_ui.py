@@ -39,12 +39,7 @@ INK = "#fffafc"
 FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
 
-CHUNK_KEYS = ["chunk_standard", "chunk_light", "chunk_fast", "chunk_full"]
-CHUNK_VALUES = ["6000", "3000", "12000", "999999"]
-
-
-def get_chunk_presets() -> list[str]:
-    return [tr(k) for k in CHUNK_KEYS]
+DEFAULT_VRAM_CHUNK = 3000
 
 
 def get_status_icon(status_key: str) -> str:
@@ -268,8 +263,6 @@ def build_ui(ctx):
     lang_display_var = tk.StringVar(value=LANG_MAP.get(I18N.current_lang, "简体中文"))
     mode_var = tk.StringVar(value="single")
     dev_var = tk.StringVar(value="cuda" if ctx.cuda_ok else "cpu")
-    vram_chunk_var = tk.StringVar(value="6000")
-    chunk_preset_var = tk.StringVar(value=get_chunk_presets()[0])
     end_extend_var = tk.StringVar(value="0.8")
     ono_gate_var = tk.BooleanVar(value=True)
     multi_order_var = tk.BooleanVar(value=False)
@@ -279,18 +272,11 @@ def build_ui(ctx):
         (lang_var, "lang", str),
         (mode_var, "align_mode", str),
         (dev_var, "dev", str),
-        (vram_chunk_var, "vram_chunk", str),
         (end_extend_var, "end_extend", str),
         (ono_gate_var, "ono_gate", lambda v: v in (True, "true", "True", 1, "1")),
         (multi_order_var, "multi_order", lambda v: v in (True, "true", "True", 1, "1")),
         (multi_persp_var, "multi_persp", lambda v: v in (True, "true", "True", 1, "1")),
     ]
-
-    def _sync_chunk_preset():
-        saved_chunk = vram_chunk_var.get()
-        presets = get_chunk_presets()
-        idx = CHUNK_VALUES.index(saved_chunk) if saved_chunk in CHUNK_VALUES else 0
-        chunk_preset_var.set(presets[idx])
 
     def _save_settings():
         try:
@@ -331,7 +317,6 @@ def build_ui(ctx):
             if "align_mode" not in data:
                 mode_var.set("multi_persp" if data.get("multi_persp") else
                              "multi_speaker" if data.get("multi_order") else "single")
-            _sync_chunk_preset()
         except Exception:
             pass
     _load_settings()
@@ -1257,21 +1242,7 @@ def build_ui(ctx):
                               state="readonly", width=25)
     lang_combo.pack(fill=tk.X, pady=(0, 14))
 
-    # 2. 显存分块预设
-    chunk_field_lbl = _label(settings_pad, tr("label_chunk"), 8, MUTED)
-    chunk_field_lbl.pack(anchor="w", pady=(0, 6))
-    chunk_combo = ttk.Combobox(settings_pad, textvariable=chunk_preset_var,
-                               values=get_chunk_presets(), state="readonly", width=25)
-    chunk_combo.pack(fill=tk.X, pady=(0, 14))
-
-    def _on_chunk_preset(_event=None):
-        idx = chunk_combo.current()
-        if 0 <= idx < len(CHUNK_VALUES):
-            vram_chunk_var.set(CHUNK_VALUES[idx])
-            _save_settings()
-    chunk_combo.bind("<<ComboboxSelected>>", _on_chunk_preset)
-
-    # 3. 字幕驻留延长
+    # 2. 字幕驻留延长
     extend_field_lbl = _label(settings_pad, tr("label_end_extend"), 8, MUTED)
     extend_field_lbl.pack(anchor="w", pady=(0, 6))
     extend_row = _frame(settings_pad, SURFACE)
@@ -1315,14 +1286,6 @@ def build_ui(ctx):
                           values=["cuda", "cpu"] if ctx.cuda_ok else ["cpu"], state="readonly")
     dev_cb.pack(fill=tk.X, pady=(0, 10))
     dev_cb.bind("<<ComboboxSelected>>", lambda e: _save_settings())
-    custom_chunk_lbl = None
-    if ctx.cuda_ok:
-        custom_chunk_lbl = _label(adv_panel, tr("label_custom_chunk"), 8, MUTED)
-        custom_chunk_lbl.pack(anchor="w", pady=(0, 5))
-        custom = tk.Entry(adv_panel, textvariable=vram_chunk_var, font=(MONO, 10), relief=tk.FLAT,
-                          bg=SURFACE, fg=TEXT, insertbackground=PINK)
-        custom.pack(fill=tk.X, ipady=6)
-        custom.bind("<FocusOut>", lambda e: (_sync_chunk_preset(), _save_settings()))
 
     start_btn = _button(settings_pad, tr("btn_start"), lambda: None, primary=True)
     start_btn.pack(fill=tk.X, pady=(4, 12))
@@ -1379,16 +1342,11 @@ def build_ui(ctx):
         settings_title_lbl.configure(text=tr("settings_title"))
         settings_sub_lbl.configure(text=tr("settings_sub"))
         lang_field_lbl.configure(text=tr("label_lang"))
-        chunk_field_lbl.configure(text=tr("label_chunk"))
-        chunk_combo.configure(values=get_chunk_presets())
-        _sync_chunk_preset()
         extend_field_lbl.configure(text=tr("label_end_extend"))
         sec_lbl.configure(text=tr("label_sec"))
         ono_check.configure(text=tr("check_ono_gate"))
         adv_toggle.configure(text=tr("adv_collapse") if adv_show.get() else tr("adv_expand"))
         dev_field_lbl.configure(text=tr("label_device"))
-        if custom_chunk_lbl is not None:
-            custom_chunk_lbl.configure(text=tr("label_custom_chunk"))
         help_btn.configure(text=tr("btn_show_guide"))
 
         log_toggle.configure(text=tr("log_panel_expanded") if log_visible.get() else tr("log_panel_collapsed"))
@@ -1446,8 +1404,8 @@ def build_ui(ctx):
         _save_settings()
         try:
             end_extend = float(end_extend_var.get() or 0)
-            chunk = int(vram_chunk_var.get() or 6000)
-            if end_extend < 0 or chunk <= 0:
+            chunk = DEFAULT_VRAM_CHUNK
+            if end_extend < 0:
                 raise ValueError
         except ValueError:
             messagebox.showerror(tr("msg_param_error_title"), tr("msg_param_error_text"), parent=root)

@@ -287,7 +287,7 @@ def _resolve_device(device):
 
 
 def compute_emission(waveform, sample_rate, device="auto", lora_path=None,
-                     chunk_frames=6000, use_stereo_pick=True,
+                     chunk_frames=3000, use_stereo_pick=True,
                      cpu_threads=None, quantize_int8=None, cpu_chunk_cap=None):
     """与 align_audio_with_text 内部的发射计算完全一致（vad=None 路径），
     但可被外部复用：同一份发射喂给多个 config，消除 GPU 卷积非确定性导致的

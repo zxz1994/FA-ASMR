@@ -48,7 +48,7 @@ def align_audio_with_text(
     sr: Optional[int] = None,
     lora_path: Optional[str | Path] = None,
     device: str = "auto",
-    chunk_frames: int = 6000,
+    chunk_frames: int = 3000,
     enable_silence_snap: bool = True,
     log_callback: Optional[Any] = None,
     precomputed_emission: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
