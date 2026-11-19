@@ -1,9 +1,9 @@
 {
   "lang": "zh",
-  "align_mode": "multi_persp",
+  "align_mode": "multi_speaker",
   "dev": "cuda",
-  "end_extend": "1.5",
+  "end_extend": "0.8",
   "ono_gate": true,
   "multi_order": true,
-  "multi_persp": true
+  "multi_persp": false
 }

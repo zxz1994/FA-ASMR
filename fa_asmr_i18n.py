@@ -61,9 +61,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "FA-ASMR · Forced Alignment Studio",
     },
     "banner_badge": {
-        "zh": "v2.2.3",
-        "ja": "v2.2.3",
-        "en": "v2.2.3",
+        "zh": "v2.4.0",
+        "ja": "v2.4.0",
+        "en": "v2.4.0",
     },
     "banner_title": {
         "zh": "FA-ASMR",

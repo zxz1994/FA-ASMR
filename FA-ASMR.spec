@@ -86,6 +86,7 @@ hiddenimports = [
     'advanced_config', 'torch_bootstrap',
     'inline_leak_clean', 'merge_short', 'ono_filter', 'ono_base', 'ono_block_corpus',
     'clause', 'np_compat', 'fa_asmr_ui', 'fa_asmr_i18n',
+    'fa_asmr_pipeline', 'fa_asmr_cli',
     'align_multispeaker', 'align_multiperspective',
 
     # ── 必须显式声明：PyInstaller 的依赖分析**漏收**这两者 ──

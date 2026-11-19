@@ -1,228 +1,185 @@
-# 🌸 FA-ASMR V2 (Forced Alignment for Japanese ASMR & Voice Dramas)
+# FA-ASMR (`v2.4.0`)
 
-[ English ](README_EN.md) | [ 简体中文 ](README.md)
+[English](README_EN.md) | **简体中文** | [Agent 操作指南 (AGENTS.md)](AGENTS.md)
 
-> **专为日语 ASMR / 二次元音声配音打造的高精度物理声学强制对齐（打轴）引擎**
-> 
-> 输入「日文台本 + 人声音频」，一键输出毫秒级精确对齐的同名标准 `.lrc` 歌词与 `.srt` 双格式字幕。
-
-
+> **专为日语 ASMR / 二次元音声打造的高精度纯声学强制对齐（打轴）引擎**
+>
+> 输入「官方日文台本 + 人声音频」，离线输出毫秒级精确对齐的 `.lrc` 与 `.srt` 双格式字幕；同时提供无界面 CLI 与标准化 [AGENTS.md](AGENTS.md)，可直接接入外部 AI Agent 实现从原始 PDF 台本到成品双语字幕的全流程自动化。
 
 ---
 
-## 一、核心优势与版本更新 (v2.2.3)
+## 一、核心特性
 
-### 🆕 v2.2.3 更新亮点
-- **原文台本直接切片还原 (`FA-ASMR_GUI.py`, `clause.py`, `align_multispeaker.py`)**：
-  - 将原先逐字逆推 `normalize()` 的原文映射重写为基于 `SequenceMatcher` 的直接双序列锚点切片，彻底修复台本含独立浊音符（`゛`/`゜`）、NFD 组合假名时后半整行雪崩成省略号/尾字的缺陷，以及 NFKC 一拆多字符（如 `℃`）在 SRT/LRC 中翻倍重复的问题；
-  - 关闭与前置清洗不同步的二次假名剥离，折叠原文已有 `{漢字|かな}` 标注防止花括号撕裂。
-- **字幕引号、促音与连字观感修复 (`clause.py`, `haruraw2norm.py`, `merge_short.py`)**：
-  - 前导开引号/开括号（`「『（`）强绑定至右侧正文，解决行首左引号丢失及上一行行尾孤悬 `「` 的问题；
-  - 排除无读音文本促音 `っ` 与词内延音/浊点作为切分边界，消除 `って → て` 丢促音与 `っ て`、`硬～ い` 误插半角空格问题。
-- **拟声守门实词保护完善 (`ono_block_corpus.py`)**：
-  - 实词黑名单新增词内延音/波浪号折叠匹配（如 `ろぉ～く`、`ご～お`、`い～～ち` 等语义倒计时与延音实词不再被误判为拟声词跳过）。
+在拥有官方台本的日语 ASMR / 音声字幕制作中，传统 Whisper 等通用 ASR 盲听转录常出现弱音吞词、专有名词错写以及长句粘连。**FA-ASMR** 采用纯声学物理强制对齐路线（Meta MMS-FA + ASMR 专用 LoRA `fa_asmr_v9e10.pt`），面向真实音声制作痛点做了全链路特化：
 
-### v2.2.2 更新亮点
-- **多视角联合对齐引擎四步重构与提速 (`align_multiperspective.py`)**：
-  - 引入基于有效音素余弦筛选的纯声学 `SimSeg` 分段校准、主视角清晰度分段归属、以及局部 `Δt` 窗口 Numba JIT (`nogil=True`) 检索与双视角并发执行；
-  - 改为单次解码音频并按需切片计算 STFT 相干性，显著缩短多视角对齐耗时，原生输出视角 A / B 各自独立的 `.lrc` 与 `.srt` 时间轴。
-- **多人模式精度与句中拟声护栏升级 (`align_multispeaker.py`)**：
-  - 移植基于双声道 STFT 相干性的单人说话遮罩（`_AudioSoloChecker`）与碰撞窗口重对齐修复（`_refine_solo_collisions`），区分真实双人重叠与单人抢词；
-  - 新增**句中夹心拟声保护**与**拆分短实词后缀保护**，同句实词中间夹着的拟声不再被挖空不显示，行首/行尾杂音保持干净剔除。
-- **全模式通用切分、推理与字幕优化 (`clause.py`, `align_model.py`, `merge_short.py`, `FA-ASMR_GUI.py`)**：
-  - **短实词顿号桥接**：同一行内被单个顿号 `、` 隔开的短实词（累计 10 字以内，如 `ダメ、です`）与口吃前缀统一保持连贯对齐，显著减少长停顿下极短实词抢跑错位（Mode 1 / 2 / 3 均生效）；
-  - **CUDA FP16 混合精度推理与显存优化**：CUDA 推理默认启用 `float16` `autocast` 并在注音阶段后及时释放 `dBert` 显存；底层固定最优 `3000` 帧分块（已从 UI 移除冗余分块开关），实测全流程峰值显存仅约 `3.74 GB`（实际张量 `2.59 GB`），4 GB 及以上显存显卡即可流畅运行；
-  - **LRC / SRT 输出观感改进**：LRC 补齐 1.0 秒最短驻留并避免嵌套插话提前清屏；无标点短句跨行合并自动补充半角空格分隔。
-
-### 核心能力概览 (v2.1.0+)
-
-在拥有官方台本的 ASMR 音声制作与汉化工作流中，传统 Whisper 等大模型盲听转录常存在弱音漏句、专有名词错写及十几秒巨型长轴粘连等痛点。FA-ASMR 采用纯声学物理强制对齐路线，并在最新版本中实现了架构级重构与升级：
-
-- **官方台本 100% 原文保真**：直接依据官方文本做声学定位，彻底避免 ASR 盲听常见的人名、专有名词错别字与近耳低语整句吞没，译者无需二次盲听校对。
-- **毫秒级子句精细化打轴**：基于声学空白与标点自动智能断行（单句 2~4 秒），并附带发音停顿即下轴的精准消失时间，告别动辄十多秒的巨型长轴，省去人工切轴与调轴。
-- **双耳人头麦抗噪 (Better-Ear)**：针对 ASMR 双声道录音，原生动态选取信噪比更优的一侧，有效抑制近耳风噪、摩擦杂音与单侧环境声干扰。
-- **🌟 新增：多人分轨与多角色对齐模式 (`align_multispeaker.py`)**：
-  - **前置要求**：台本需具备明确的角色标注（支持行首/行内 `〖角色名〗` 或独立的 `【角色名】` 标题行）；
-  - **解决痛点**：多人音声常采用分轨录制、后期混音，官方台本往往按角色分块排版，导致跨角色的排版顺序与实际录音中的先后插话顺序存在局部交错；
-  - **实现机制**：开启后，引擎按角色将台本拆分为独立音频流分别进行声学定位，最后依据实际发音时间戳进行时间轴合并，避免单链对齐因跨角色时序交错而发生整体拉扯错位，对双人并发重叠与娇喘也具有更好容错。
-- **🌟 新增：多视角联合对齐模式 (`align_multiperspective.py`)**：
-  - **运行前置**：本模式基于多角色分流引擎运行，**台本必须具备规范的角色标注**，且需同时提供同一场次的视角 A 与 视角 B 两轨音频；
-  - **自适应择优打轴**：在双机位交替/移动录音中，引擎自动在帧级与子句级评估两视角的声学置信度与能量，**自动择取发音更清晰、声学特征更明显的那一侧视角时间轴进行定位**，避免单视角因声优远离麦克风、弱音模糊导致的打轴失真；
-  - **双机位时间轴自校准**：结合音素特征互相关自动测算两机位物理时间差 $\Delta t$，构建全集主时间轴，并最终分别投影导出视角 A 与 视角 B 各自独立坐标系的字幕文件。
-- **🌟 新增：现代化卡片流式“夜樱亮色工作台”与中日英多语言 (`fa_asmr_ui.py`, `fa_asmr_i18n.py`)**：
-  - 界面与底层对齐引擎完全解耦，支持卡片式流式批处理；
-  - 支持在界面列表内直接拖拽重排与文件配对调整；
-  - 支持简体中文、日本語、English 界面无缝一键即时热切换。
-- **🌟 新增：智能多编码自适应嗅探读取 (`read_text_auto_encoding`)**：
-  - 原生自适应 UTF-8（含 BOM）、Shift-JIS / CP932（DLsite 与日文声优原生台本）、GB18030 / GBK、UTF-16 等多种编码，彻底告别乱码与编码崩溃。
-- **🌟 新增：双字幕格式导出支持**：
-  - 除标准 `.lrc` 歌词外，新增标准 `.srt` 字幕导出，完整保留角色标签与精确起止时间戳。
-- **极速与低资源占用**：Viterbi 解码核心经 Numba JIT 优化，显存占用远低于 Whisper 大模型，1 小时音频数分钟内即可完成打轴。
-
-### 易错拟声词守门机制 (Ono Filter)
-
-- **动作拟声与自由娇喘**：
-  1. 台本上以假名记录动作声音（如 `ちゅ`、`じゅる`、`れるぅ`），但声优发出的是真实的物理亲吻音、舔舐音或吞咽声，并非字面念出假名；
-  2. 台本中的呻吟词（如 `んっ`、`ふぁ…`、`あぁ…` 等），声优录制时长短、节奏自由发挥，无法与假名字面一一严密对应。  
-  这两类词强行按字面对齐在绝大多数情况下都会导致时间轴撕裂错位。守门器会自动识别它们，并在对齐出现异常时将其安全平滑处理，只保留有效台词，避免破坏整体时间轴（可在设置中开关）。
+* **100% 原文保真与双序列切片还原**：直接依据官方台本定位声学时间轴，基于 `SequenceMatcher` 锚点切片精准还原原文字符（兼容独立浊音符、NFKC 特殊符号、已有 `{漢字|かな}` 标注、前导开引号与无读音促音），告别盲听错别字。
+* **双耳人头麦抗噪 (Better-Ear)**：针对双声道 ASMR 录音，动态评估左右声道声学质量与底噪，抑制近耳风噪、摩擦声与单侧干扰。
+* **三种专业对齐模式**：
+  * **01 常规单向对齐 (`single`)**：标准单声优音声，全局 CTC Viterbi 解码（Numba JIT 多线程加速）+ 静音吸附。
+  * **02 多人分轨 / 乱序重排 (`multi_speaker`)**：面向多声优分轨混音、角色插话交错、台词与喘息重叠场景；按角色拆流独立定位并结合双声道 STFT 相干性独白遮罩修复抢词冲突。
+  * **03 多视角联合对齐 (`multi_persp`)**：面向**两轨视角各自都有角色说话且清晰度互补**的双机位作品；自动校准双轨物理时间差 $\Delta t$，按清晰侧择优打轴并分别投影输出视角 A / B 各自独立坐标系的 `.lrc` 与 `.srt`。（注：若另一轨仅为隔墙闷音处理而无清晰度互补，直接使用清晰主轨跑模式 01/02 即可。）
+* **内置拟声词守门与智能断句 (`ono_filter` / `resegment` / `merge_short`)**：
+  * 自动识别亲吻、舔舐、吞咽及自由发挥喘息等易致时间轴撕裂的纯拟声行并安全过滤，同时保护句中夹心拟声与延音实词（如 `ろぉ～く`、`い～～ち`）；
+  * 结合声学停顿与标点自动切分短句、桥接短实词顿号并合并过碎片段，默认输出即可直接观看或翻译。
+* **Obsidian Acoustic Console 暗色工作台**：全新暗色专业音频控制台桌面端（支持 Windows 高分屏 DPI 感知、拖拽配对与互换、单轨/多轨/双视角切换，以及简体中文 / 日本語 / English 即时热切换）。
+* **多编码自动嗅探与低硬件门槛**：原生自动识别 UTF-8 / UTF-8-BOM / Shift-JIS (CP932) / GB18030 / UTF-16，无需手动转码；CUDA 默认 FP16 混合精度 + 固定最优 `3000` 帧分块（峰值显存约 `3.74 GB`，4 GB+ 显存即可运行），无显卡设备支持 CPU INT8 动态量化。
 
 ---
 
 ## 二、快速开始
 
-### 2.0 免安装预编译版（推荐普通用户）
+### 2.1 免安装预编译版（推荐普通用户）
 
-无需安装 Python 与 PyTorch，下载解压即用，已完整内置 1.26 GB 声学模型与 LoRA 适配器：
+无需安装 Python 与 PyTorch，解压即用，已完整内置 1.26 GB MMS-FA 基础模型、yomikata dBert 权重与 ASMR LoRA 适配器：
 
-- **CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.2.3-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
-- **CUDA GPU 版**（N 卡用户，速度极快，支持 4 GB+ 显存 FP16）：下载全部分卷（`FA-ASMR-v2.2.3-Windows-GPU.zip.001` 等）与 `merge_split_gpu_zip.bat` 至同一文件夹，双击该批处理自动合并后解压运行 `运行FA-ASMR.bat`。
+* **Windows CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.4.0-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
+* **Windows CUDA GPU 版**（推荐 N 卡用户，支持 4 GB+ 显存）：下载全部分卷（`FA-ASMR-v2.4.0-Windows-GPU.zip.001` 等）与 `merge_split_gpu_zip.bat` 至同一目录，双击合并脚本后解压运行 `运行FA-ASMR.bat`。
 
-下载地址：[GitHub Releases (v2.2.3)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+> 前往下载：[GitHub Releases (v2.4.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
-> 以下为源码运行方式，适合开发者或需要自行修改代码的用户。
+### 2.2 源码运行（开发者 / CLI / Agent 环境）
 
-### 2.1 环境准备
-
-- **Python 版本**：推荐 Python 3.10 ~ 3.12 (64-bit)
-- **硬件推荐**：NVIDIA GPU（支持 CUDA）可获得极速对齐体验；亦支持 CPU 模式（多线程 + 动态量化）
+环境要求：Python 3.10 ~ 3.12 (64-bit)，推荐 NVIDIA GPU (CUDA) 或多核 CPU。
 
 ```bash
-# 1. 克隆本仓库
+# 1. 克隆仓库
 git clone https://github.com/zxz1994/FA-ASMR.git
 cd FA-ASMR
 
-# 2. 安装核心依赖
+# 2. 安装 PyTorch 2.6.0（按硬件二选一）
+# CUDA 12.4：
+pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# 或 CPU 版：
+# pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+
+# 3. 安装核心依赖
 pip install -r requirements.txt
 
-# 3. 单独安装注音模型（其 setup 会拉入大量无关开发依赖，故不列入 requirements）
+# 4. 单独安装注音模型（避免拉入冗余开发依赖）
 pip install --no-deps yomikata
 ```
 
-> **PyTorch 说明**：
-> 推荐安装 PyTorch 2.6.0：
-> - CUDA 版（以 CUDA 12.4 为例）：  
->   `pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124`
-> - CPU 版：  
->   `pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu`
+**模型权重说明**：
 
-### 2.2 模型权重准备
+| 模型文件 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| **MMS-FA 基础模型** | `models/hub/checkpoints/model.pt` | 约 1.2 GB，首次运行自动下载；也可预先放置实现纯离线运行 |
+| **ASMR 专用 LoRA** | `lora/fa_asmr_v9e10.pt` | **仓库已内置**（约 12.2 MB），针对日语 ASMR 耳语/弱音调优 |
 
-| 模型文件 | 存放路径 | 说明 |
-|---|---|---|
-| **MMS-FA 基础模型** (`model.pt`) | `models/hub/checkpoints/model.pt` | 约 1.2 GB。首次运行会自动下载，亦可手动放置于该路径实现全离线对齐 |
-| **ASMR 专用 LoRA** (`fa_asmr_v9e10.pt`) | `lora/fa_asmr_v9e10.pt` | **仓库已自带**（约 12.2 MB），针对二次元日语 ASMR 拟声/动作音/耳语调优 |
-
-### 2.3 启动程序
-
-- **Windows 用户**：直接双击运行根目录的 `run.bat`
-- **命令行启动**：
-  ```bash
-  python FA-ASMR_GUI.py
-  ```
+**启动桌面端**：
+* Windows 直接双击 `run.bat`，或命令行执行 `python FA-ASMR_GUI.py`。
 
 ---
 
-## 三、使用说明
+## 三、AI Agent 与命令行自动化（端到端工作流）
 
-### 3.1 界面与操作
+**FA-ASMR 不内嵌任何大模型 API Key 或在线接口**，保持 100% 纯离线物理对齐；需要“原始 PDF/DOCX 台本清洗 → 强制打轴 → 结合 DLsite 作品背景精翻中文/双语字幕”全自动闭环时，推荐直接配合你手头的 **AI Agent**（Antigravity、Claude Code、Codex、Cursor、Gemini CLI 等）驱动本仓库。
 
-1. **拖拽导入**：支持将音频与台本文本（`.txt`）直接批量拖入卡片工作台，程序会根据文件名自动配对。
-2. **列表卡片管理**：可在列表中直接上下拖拽调整排版配对，随时暂停、重试或移除单组任务。
-3. **支持音频格式**：`.wav`, `.mp3`, `.flac`, `.m4a`, `.ogg`, `.aac`, `.opus`, `.wma`。
-4. **核心参数配置**：
-   - **语言选择 (Language)**：支持「简体中文 / 日本語 / English」即时无缝切换。
-   - **对齐模式**：
-     - **01 常规单向对齐**：标准剧场、单人音声首选；
-     - **02 多人/乱序重排对齐**：针对多声优交错录制、台本乱序颠倒、边说台词边呻吟等复杂场景（台本须带角色标注）；
-     - **03 多视角联合对齐**：基于多角色引擎，针对双机位录制自动择取声学特征清晰侧对齐，导出两视角独立时间轴。
-   - **推理设备**：可选 `cuda`（GPU）或 `cpu`。GPU 模式默认采用实测最优的 3000 帧分块 + FP16（全流程峰值显存占用约 `3.74 GB`，4 GB+ 显卡即可直接运行）；CPU 模式自动限制为 2000 帧分块并启用 INT8 动态量化。
-   - **行尾时长自然延长**：为句末字幕提供更舒适的停留时间。
-   - **拟声词守门开关**：开启后将自动清洗由于发音微弱或错位导致时间轴失真的孤立拟声词。
+仓库根目录已内置完整的 [AGENTS.md](AGENTS.md) 操作手册与无界面命令行工具 [fa_asmr_cli.py](fa_asmr_cli.py)。
 
-### 3.2 台本格式与智能配对规范
+### 3.1 直接让 Agent 接管全流程
 
-- **文件匹配规则**：
-  - **基础同名匹配**：`01_话名.wav` 对应 `01_话名.txt`；
-  - **文件名说话人声明**：支持在台本文件名尾部附加角色标签，如 `01_话名_〖澄华〗〖天音〗.txt`，程序会自动剥除说话人后缀并与 `01_话名.wav` 精准配对。
-- **台本编码与内容**：
-  - 支持 UTF-8、Shift-JIS、GB18030、UTF-16 自动识别；
-  - **括号动作提示**：建议提前删去括号内的动作提示、背景设定、场景号等不发音内容；
-  - **行内说话人标记**：支持在台本行内任意位置写入 `〖角色名〗`（U+3016 / U+3017）或独立 `【角色名】` 行，输出 LRC/SRT 时会自动还原保留。
+把本仓库路径和你的作品目录交给任意支持终端的 AI Agent，只需发一句：
 
-### 3.3 输出产物
+> “请阅读 `E:\FA-ASMR\AGENTS.md`，按里面的工作流处理 `./RJ01234567`：提取清洗台本、调用 `fa_asmr_cli.py` 完成对齐，并调研作品背景后翻译输出中文字幕。”
 
-对齐完成后，在音频同级目录下输出同名标准 `.lrc` 与 `.srt` 字幕文件。时间戳采用标准双位百分秒：
+Agent 会自动按 [AGENTS.md](AGENTS.md) 执行：
+1. **前置台本提取与清洗**：解析竖排 / 分栏 / 颜色分角色 PDF，剥除动作与 SE 提示，统一 `〖角色名〗` 标注；
+2. **模式判定与 CLI 对齐**：根据剧情语义判定单人 / 多人 / 真双视角，先跑 `--dry-run` / `--verify-script` 校验，再调用 `fa_asmr_cli.py --json` 批量生成精确日轴；
+3. **背景调研与逐行翻译**：根据 RJ 编号查清作品设定与角色口吻，直接沿用引擎产出的精准时间轴逐行翻译为自然流畅的中文/双语字幕。
 
-- **LRC 格式**：
-```text
-[00:05.58]わぁ...! ねぇ、見てみてっ!
-[00:08.62]
-[00:12.30]すっごくいい景色!
-[00:15.00]
+### 3.2 `fa_asmr_cli.py` 常用命令
+
+默认 `--mode auto`（有 `--audio-b` 或双视角文件对自动走 `multi_persp`，台本 ≥2 角色自动走 `multi_speaker`，否则走 `single`）：
+
+```bash
+# 1. 整目录配对预检（不加载模型，秒级检查配对、编码、角色与自动判定的模式）
+python fa_asmr_cli.py --batch ./作品目录 --dry-run --json
+
+# 2. 单台本深度校验（真实运行 AutoRuby 注音、角色标题归一化、顿号桥接与子句统计）
+python fa_asmr_cli.py --verify-script ./01.txt --json
+
+# 3. 单条音频对齐（自动判模式；JSON 摘要走 stdout，过程日志自动走 stderr）
+python fa_asmr_cli.py --audio ./01.flac --script ./01.txt --extend 1.0 --json
+
+# 4. 双视角联合对齐
+python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt --json
+
+# 5. 整目录批量对齐（自动复用显存，结束后释放）
+python fa_asmr_cli.py --batch ./作品目录 --json
 ```
 
-- **SRT 格式**：带精准开始与结束下轴时间，并完整保留角色名样式标签。
-
-### 3.4 进阶底层配置 (`advanced_config.json`)
-
-仅供进阶用户或针对特定硬件手工修改（保存后重启生效，GUI 从不覆盖此文件）：
-- `cpu_threads`：CPU 推理前向线程数（默认 `null` 为自动取物理核心数）；
-- `quantize_int8`：CPU INT8 动态量化加速（默认 `null` 自动判断：CPU 开启 / GPU 关闭）；
-- `cpu_chunk_cap`：CPU 模式单块最大帧数上限（默认 `2000`）。
+> **免安装冻结版用户**：同样支持命令行调用 `FA-ASMR.exe --cli ... --json-out summary.json`（因冻结版为无控制台窗口模式，建议配合 `--json-out` 读取结构化结果）。
 
 ---
 
-## 四、模块架构
+## 四、桌面端使用与台本规范
 
-仓库代码结构清晰解耦，各功能模块职责如下：
+### 4.1 音频支持与配对规则
+
+* **支持音频格式**：`.wav`、`.mp3`、`.flac`、`.m4a`、`.ogg`、`.aac`、`.opus`、`.wma`。
+* **智能文件配对**：
+  * **基础同名**：`01_话名.wav` 匹配 `01_话名.txt`（支持在台本文件名尾部附加角色后缀 `01_话名〖澄華〗〖天音〗.txt`）；
+  * **双视角配对**：`01_A.wav` / `01_B.wav` 或 `トラック7‗主人公視点.wav` / `トラック7‗夫視点.wav` 自动归并匹配同基名台本；
+  * 拖拽导入后，可在中央轨道矩阵内直接拖放互换或调整配对。
+
+### 4.2 台本格式建议
+
+* **编码**：UTF-8 / UTF-8-BOM / Shift-JIS (CP932) / GB18030 / UTF-16 全自动识别，无需手动转码。
+* **非发音内容**：建议提前移除动作/演技指导、SE/BGM 提示与场次标题；内联注音 `漢字（かんじ）` 建议剥除或写为 `{漢字|かんじ}`。
+* **说话人标记（多人 / 双视角模式）**：
+  * 推荐统一使用 `〖角色名〗`（独立行或行首/行内均可），多人同时说话写为 `〖澄華〗〖天音〗せーの！`；
+  * 原生兼容高频复现的独立 `【角色名】` 标题行。
+
+### 4.3 字幕输出与进阶配置
+
+* 对齐完成后，在音频同级目录生成同名标准 **`.lrc`**（带精确下轴空白行与 `角色名：` 前缀）与 **`.srt`**（支持多角色独立时间流与 `【角色名】` 前缀）。
+* 进阶硬件参数可在只读文件 `advanced_config.json` 中调整（保存后重启生效）：
+  * `cpu_threads`：CPU 推理线程数（默认 `null` 自动取物理核心数）；
+  * `quantize_int8`：CPU INT8 动态量化（默认 `null`：CPU 开启 / GPU 关闭）；
+  * `cpu_chunk_cap`：CPU 单块最大帧数上限（默认 `2000`）。
+
+---
+
+## 五、项目结构与回归测试
 
 ```text
 FA-ASMR/
-├── assets/                     # GUI 界面横幅、图标与预览截图资源
-│   ├── asmr_banner.jpg
-│   ├── asmr_mascot.png
-│   ├── mascot_icon.png
-│   └── ui_preview.png
-├── furigana/                   # 日语振假名注音系统
-│   ├── fa_asmr_converter.py    # 三层注音转换与 Unicode 部首兼容
-│   └── overrides.json          # 特殊读音与异读覆盖表
-├── lora/                       # 模型适配权重
-│   └── fa_asmr_v9e10.pt        # 生产级 ASMR 适配 LoRA 权重
-├── advanced_config.json        # 底层进阶参数（只读）
-├── advanced_config.py          # 底层参数加载器
+├── AGENTS.md                   # 外部 AI Agent 端到端操作与维护指南
+├── fa_asmr_cli.py              # 无界面 CLI（--mode auto / --dry-run / --verify-script / --json）
+├── fa_asmr_pipeline.py         # 无界面核心对齐管线、编码嗅探、LRC/SRT 组装与文件配对
+├── FA-ASMR_GUI.py              # 桌面端启动器、--cli 路由与 --self-test 打包自检
+├── fa_asmr_ui.py               # Obsidian Acoustic Console 暗色音频控制台前端
+├── fa_asmr_i18n.py             # 中 / 日 / 英三语热切换词典
 ├── align.py                    # 单向对齐主引擎入口
-├── align_acoustic.py           # 逐帧 RMS、底噪估计、双声道 Better-Ear 融合
-├── align_model.py              # MMS-FA 加载、LoRA 注入与动态量化
-├── align_multiperspective.py   # 多视角联合对齐与动态融合引擎 (NEW)
-├── align_multispeaker.py       # 多人分轨混音 / 台本乱序 / 台词拟声重叠对齐引擎 (NEW)
+├── align_multispeaker.py       # 多人分轨 / 乱序重排 / STFT 独白遮罩引擎
+├── align_multiperspective.py   # 多视角联合校准与双坐标投影引擎
+├── align_trellis.py            # 全局约束 CTC Viterbi 解码器（Numba JIT）
+├── align_acoustic.py           # 逐帧 RMS、底噪估计与双声道 Better-Ear 融合
+├── align_model.py              # MMS-FA 加载、LoRA 注入、FP16 / INT8 推理
 ├── align_post.py               # 静音吸附、Token 时间戳回映射与单调化
-├── align_trellis.py            # 全局 CTC Trellis Viterbi 解码器（Numba JIT）
-├── align_utils.py              # 文本规范化、长音折叠、时间格式化
-├── clause.py                   # 跨模块契约字段常量（F）与子句边界判据
-├── FA-ASMR_GUI.py              # 程序主入口与批处理调度器
-├── fa_asmr_ui.py               # 解耦的夜樱亮色卡片流式桌面 UI (NEW)
-├── fa_asmr_i18n.py             # 中/日/英三语国际化支持模块 (NEW)
-├── fa_asmr_settings.json       # GUI 界面参数持久化文件
-├── haruraw2norm.py             # 汉字/假名/罗马音到 MMS-FA 音素转换
-├── inline_leak_clean.py        # 内联振假名残留自动清洗
-├── lrc_end_extend.py           # 字幕尾端延展处理
-├── merge_short.py              # 基于声学留白的短句智能合并
-├── np_compat.py                # NumPy 2.x 向下兼容垫片
-├── ono_base.py                 # 易错拟声词底层模式识别
-├── ono_block_corpus.py         # 拟声词黑名单词库（保留实词）
-├── ono_filter.py               # 拟声词多阶段守门过滤器
-├── resegment.py                # 标点驱动的声学断句重分段
-├── torch_bootstrap.py          # PyTorch 运行环境检测与引导
-├── build_in_ci.py              # 自动化构建打包脚本
-├── FA-ASMR.spec                # PyInstaller 打包配置规范
-├── requirements.txt            # Python 依赖清单
-└── run.bat                     # Windows 一键启动脚本
+├── align_utils.py              # 基础文本规范化与时间戳正则
+├── clause.py                   # 跨模块数据契约常量 (F)、子句边界与短句顿号桥接
+├── haruraw2norm.py             # 汉字 / 假名 / 罗马音到 MMS-FA 音素转换
+├── inline_leak_clean.py        # 内联振假名泄露自动清洗
+├── ono_base.py / ono_filter.py / ono_block_corpus.py  # 拟声词多阶段守门与实词保护
+├── resegment.py / merge_short.py / lrc_end_extend.py  # 标点重分段、短句合并与尾端延展
+├── furigana/                   # 三层日语振假名注音引擎与异读覆盖表
+├── lora/fa_asmr_v9e10.pt       # 内置 ASMR 专用 LoRA 适配器权重
+├── tests/                      # 零依赖回归测试套件（标准库 unittest）
+└── build_in_ci.py / FA-ASMR.spec  # GitHub Actions CPU & CUDA 双变体打包脚本
+```
+
+运行零依赖回归测试（标准库 `unittest`，无需安装额外测试框架）：
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
 ---
 
-## 五、开源协议与鸣谢
+## 六、开源协议与鸣谢
 
-本项目基于 MIT License 开源。
-- 基础对齐框架参考 Meta MMS-FA (Massively Multilingual Speech) 理念
-- 日语注音与分词集成了 Fugashi (UniDic)、yomikata 及 PyKakasi
+本项目基于 **MIT License** 开源。
+* 声学强制对齐基础模型基于 [Meta MMS-FA](https://pytorch.org/audio/stable/tutorials/forced_alignment_for_multilingual_data_tutorial.html)
+* 日语分词与振假名注音集成了 [Fugashi (UniDic)](https://github.com/polm/fugashi)、[yomikata](https://github.com/passaglia/yomikata) 与 [PyKakasi](https://github.com/miurahr/pykakasi)

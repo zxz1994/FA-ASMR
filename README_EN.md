@@ -1,230 +1,170 @@
-# 🌸 FA-ASMR V2 (Forced Alignment for Japanese ASMR & Voice Dramas)
+# FA-ASMR (`v2.4.0`)
 
-[ English ](README_EN.md) | [ 简体中文 ](README.md)
+**English** | [简体中文](README.md) | [Agent Guide (AGENTS.md)](AGENTS.md)
 
-> **High-precision acoustic forced alignment engine designed specifically for Japanese ASMR, drama CDs, and anime voice acting.**
-> 
-> Input: Japanese script (`.txt`) + Vocal audio (`.wav`, `.mp3`, `.flac`, etc.)  
-> Output: Millisecond-accurate standard `.lrc` and `.srt` subtitle files with precise start/end timestamps.
-
-
+> **High-Precision Pure-Acoustic Forced Alignment Engine for Japanese ASMR & Voice Dramas**
+>
+> Feed an official Japanese script and voice audio to generate millisecond-accurate `.lrc` and `.srt` subtitles completely offline. Ships with both a dark desktop studio UI and a headless CLI + [`AGENTS.md`](AGENTS.md) workflow for seamless integration with external AI Agents.
 
 ---
 
-## 1. Core Advantages & Updates (v2.2.3)
+## 1. Core Capabilities
 
-### 🆕 What's New in v2.2.3
-- **Direct Original Script Slicing (`FA-ASMR_GUI.py`, `clause.py`, `align_multispeaker.py`)**:
-  - Replaces the fragile char-by-char reverse normalization map with direct `SequenceMatcher` boundary slicing against the original script line, eliminating full-line collapse on spacing voicing marks (`゛`/`゜`) and NFD kana as well as duplication on 1-to-many NFKC expansions (`℃`);
-  - Unifies inline-leak cleanup with `_body_lines` and folds existing `{漢字|かな}` annotations cleanly so markup never leaks across line breaks.
-- **Quotes, Sokuon & Spacing Fixes (`clause.py`, `haruraw2norm.py`, `merge_short.py`)**:
-  - Binds opening quotes/brackets (`「『（`) tightly to following text so leading quotes are never dropped or left dangling at the end of the preceding line;
-  - Excludes unpronounced sokuon `っ`, word-internal prolongation marks, and voicing marks from clause boundaries, fixing dropped `っ` (`って → て`) and spurious spaces (`っ て`, `硬～ い`).
-- **Onomatopoeia Blocker Prolongation Folding (`ono_block_corpus.py`)**:
-  - Folds word-internal `ー/～/〜/~` when checking real-word blocklists so prolonged spoken words and countdown numerals (`ろぉ～く`, `い～～ち`, etc.) are reliably preserved.
+In Japanese ASMR and voice drama subtitling where official scripts are available, general-purpose ASR models like Whisper frequently drop whispered dialogue, hallucinate proper nouns, and merge utterances into long blocks. **FA-ASMR** takes a pure physical acoustic forced-alignment approach (Meta MMS-FA + custom ASMR LoRA `fa_asmr_v9e10.pt`) engineered specifically for binaural voice recordings:
 
-### What's New in v2.2.2
-- **4-Stage Multi-Perspective Engine Rewrite & Acceleration (`align_multiperspective.py`)**:
-  - Introduces phoneme-filtered acoustic `SimSeg` calibration, home-perspective segment scoring, Numba JIT (`nogil=True`) local `Δt` window search, and concurrent dual-perspective alignment;
-  - Uses single-pass audio decoding with lazy sliced STFT coherence checks, substantially reducing runtime while projecting independent A/B native timelines to `.lrc` and `.srt`.
-- **Multi-Speaker Accuracy & Inline Onomatopoeia Preservation (`align_multispeaker.py`)**:
-  - Backports stereo STFT solo-speech masking (`_AudioSoloChecker`) and collision window repair (`_refine_solo_collisions`) to distinguish genuine overlapping dialogue from false claims;
-  - Preserves inline sandwiched onomatopoeia between semantic clauses in the same line without dropping mid-sentence words, while still pruning leading/trailing noise and protecting short comma-split word suffixes.
-- **Cross-Mode Segmentation, FP16 Inference & Output Polish (`clause.py`, `align_model.py`, `merge_short.py`, `FA-ASMR_GUI.py`)**:
-  - **Short Comma-Bridge Clause Grouping**: Short semantic clauses joined by a single Japanese comma `、` within the same line (up to 10 characters, e.g., `ダメ、です`) are bridged together during alignment across Modes 1/2/3 to prevent short-word early drift across long pauses;
-  - **CUDA FP16 Inference & Low VRAM Footprint**: Enables `torch.autocast` (`float16`) on CUDA, releases `dBert` VRAM immediately after furigana annotation, and standardizes on the optimal `3000`-frame chunk size (redundant UI chunk selector removed). Measured peak reserved VRAM across Modes 1/2/3 is ~`3.74 GB` (~`2.59 GB` allocated), fitting 4 GB+ GPUs out of the box;
-  - **Subtitle Readability Polish**: Aligns LRC minimum 1.0s display duration with overlap-safe clearing and inserts thin spaces when merging unpunctuated short lines.
-
-### Core Architecture Highlights (v2.1.0+)
-
-When subtitle makers and translators already possess official scripts (as is standard for DLsite/DMM voice dramas), using general-purpose ASR models like Whisper introduces critical issues: missed whispers, misheard character names, and bloated 10–20 second monolithic subtitle blocks. 
-
-FA-ASMR V2 utilizes a **100% pure acoustic forced alignment architecture** (Meta MMS-FA + ASMR-specialized LoRA + Constrained CTC Trellis dynamic programming). The latest release brings major architectural upgrades:
-
-- **100% Script Fidelity (Zero Hallucination)**: Directly aligns the official script to acoustic features. Eliminates ASR transcription errors and prevents near-ear whispers from being discarded as silence. Translators can work directly from the original script without audio proofreading.
-- **Sub-clause Granularity & Natural Pauses**: Intelligently segments subtitles based on acoustic pauses and Japanese punctuation into natural reading units (typically 2–4 seconds per line). Automatically inserts empty timestamp lines upon vocal cessation, eliminating unnatural text hanging on screen.
-- **Binaural Better-Ear Acoustic Fusion**: Specifically optimized for 3Dio and dummy-head stereo recordings. Evaluates log-odds ratios across stereo channels on a frame-by-frame basis to dynamically select the cleanest ear, suppressing near-ear breath pop, mouth friction, and unilateral background noise.
-- **🌟 NEW: Multi-Speaker Track Mixing & Dialogue Reordering Engine (`align_multispeaker.py`)**:
-  - **Prerequisite**: Script must contain clear character annotations (supports line-start/in-line `〖Character〗` tags or standalone `【Character】` headers).
-  - **Problem Solved**: Multi-voice dramas are often recorded across separate tracks and mixed later, causing official script layouts by character to stagger or flip relative to actual chronological dialogue.
-  - **Mechanism**: Deconstructs script lines into independent acoustic streams per character, aligns each against the audio, and merges them strictly based on empirical vocal timestamps. Prevents monolithic timeline tearing and provides robust tolerance for overlapping speech and spontaneous panting.
-- **🌟 NEW: Multi-Perspective Joint Alignment Engine (`align_multiperspective.py`)**:
-  - **Prerequisite**: Operates atop the multi-speaker engine; **the script must contain character tags**, and audio tracks for both Perspective A and Perspective B must be provided.
-  - **Acoustic-Clear Channel Selection**: In dual-perspective recordings, the engine evaluates frame-level and clause-level acoustic confidence and energy, **automatically prioritizing the perspective where acoustic features are clearer and vocal signals are strongest**. This prevents timeline drift when a voice actor moves away from one microphone.
-  - **Dual-Perspective Offset Calibration**: Uses phoneme-level feature cross-correlation to measure the inter-mic time delta $\Delta t$, builds a Union Master Timeline, and projects separate subtitle files for each perspective's native coordinate system.
-- **🌟 NEW: Modern "Sakura-Light Workspace" UI (`fa_asmr_ui.py`) & Multi-language Support (`fa_asmr_i18n.py`)**:
-  - Completely decoupled UI architecture supporting card-stream batch processing.
-  - Drag-and-drop task reordering and script-audio pairing adjustments directly in the UI.
-  - Seamless, instant hot-switching between Simplified Chinese, Japanese, and English.
-- **🌟 NEW: Smart Multi-Encoding Auto-Detection (`read_text_auto_encoding`)**:
-  - Native fallback sniffing for UTF-8 (with BOM), Shift-JIS / CP932 (standard for DLsite scripts), GB18030 / GBK, and UTF-16, eliminating encoding crashes.
-- **🌟 NEW: Dual LRC & SRT Output Support**:
-  - Outputs standard `.lrc` lyrics as well as standard `.srt` subtitles with full speaker styling preserved.
-- **High Performance & Low VRAM Usage**: Accelerated by Numba JIT. VRAM consumption is a fraction of large ASR models, aligning a 1-hour drama CD in just a few minutes.
-
-### Acting Onomatopoeia Filter (Ono Filter)
-
-- **Physical Action Sounds & Spontaneous Moans**:
-  1. Scripts often write sound effects with kana (e.g., `ちゅ` for kissing, `じゅる` for sucking, `れるぅ` for licking). However, voice actors produce actual physical mouth/body sounds rather than pronouncing kana phonemes.
-  2. Kana sequences like `んっ`, `ふぁ…`, or `あぁ…` represent emotional performance directions with spontaneous pacing, pitch, and duration that rarely match the literal kana count.  
-  Forcing alignment on these tokens frequently causes severe timeline distortion. The built-in Ono Filter detects these acting markers and automatically cleans stretched onomatopoeia lines while strictly preserving genuine speech dialogue.
+* **100% Script Fidelity with Direct Anchor Slicing**: Aligns directly against the official script and restores exact original characters via `SequenceMatcher` slicing (preserving standalone dakuten/handakuten, NFKC symbols, pre-existing `{漢字|かな}` ruby annotations, leading opening quotes, and silent sokuon).
+* **Binaural Better-Ear Noise Resilience**: Dynamically evaluates left/right channel SNR and noise floors on stereo binaural recordings to suppress mic wind, cloth rustling, and single-ear interference.
+* **Three Specialized Alignment Modes**:
+  * **01 Single-Track Sequential (`single`)**: Standard single-speaker dramas using a Numba JIT multi-threaded global CTC Viterbi decoder with silence snapping.
+  * **02 Multi-Speaker / Reordered (`multi_speaker`)**: Handles multi-VA split-track mixes, interleaved lines, local script reordering, and overlapping speech/breaths via per-speaker stream alignment and stereo STFT coherence solo masking.
+  * **03 Multi-Perspective Joint Alignment (`multi_persp`)**: Built for dual-POV recordings where **both perspectives contain active dialogue with complementary clarity** across speakers or segments; calibrates inter-track time offset $\Delta t$, selects the clearer acoustic side per segment, and exports independent `.lrc` and `.srt` timelines for both POV A and POV B. *(Note: if the second track is merely a wall-muffled / low-pass version with no complementary clarity, align the clear primary track with Mode 01/02 instead.)*
+* **Built-In Onomatopoeia Gate & Smart Segmentation (`ono_filter` / `resegment` / `merge_short`)**:
+  * Filters timing-breaking pure kissing/licking/swallowing/breath-only lines while protecting mid-sentence vocalizations and elongated real words (e.g., `ろぉ～く`, `い～～ち`);
+  * Automatically segments on acoustic pauses and punctuation, bridges short comma-separated words, and merges overly fragmented clauses so output subtitles are immediately watchable and translation-ready.
+* **Obsidian Acoustic Console Desktop UI**: Dark studio console frontend featuring Windows High-DPI awareness, drag-and-drop track pairing/swapping, instant 3-mode switching, and live Chinese / Japanese / English UI hot-switching.
+* **Auto Encoding Detection & Low VRAM Footprint**: Automatically detects UTF-8, UTF-8-BOM, Shift-JIS (CP932), GB18030, and UTF-16 without manual transcoding; runs CUDA FP16 with a fixed optimal `3000`-frame chunk (`~3.74 GB` peak VRAM, 4 GB+ GPUs supported) and CPU INT8 dynamic quantization.
 
 ---
 
 ## 2. Quick Start
 
-### 2.0 Prebuilt Portable Release (Recommended for End Users)
+### 2.1 Pre-Built Windows Releases (Recommended)
 
-No Python or PyTorch installation required. Unzip and run — the 1.26 GB acoustic model and LoRA adapter are bundled inside:
+No Python or PyTorch setup required—includes the 1.26 GB MMS-FA base model, yomikata dBert weights, and ASMR LoRA adapter out of the box:
 
-- **CPU edition** (works on any PC): download `FA-ASMR-v2.2.3-Windows-CPU.zip`, extract, then double-click `运行FA-ASMR.bat`;
-- **CUDA GPU edition** (fast on NVIDIA 4 GB+ GPUs with FP16): download all split parts (`FA-ASMR-v2.2.3-Windows-GPU.zip.001`, etc.) plus `merge_split_gpu_zip.bat` into one folder, double-click the batch file to merge, then extract and run `运行FA-ASMR.bat`.
+* **Windows CPU Edition** (all PCs): Download `FA-ASMR-v2.4.0-Windows-CPU.zip`, extract, and double-click `运行FA-ASMR.bat`.
+* **Windows CUDA GPU Edition** (NVIDIA GPUs, 4 GB+ VRAM): Download all split volumes (`FA-ASMR-v2.4.0-Windows-GPU.zip.001`, etc.) and `merge_split_gpu_zip.bat` into the same folder, run the merge script, extract, and launch `运行FA-ASMR.bat`.
 
-Download: [GitHub Releases (v2.2.3)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+> Download: [GitHub Releases (v2.4.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
-> The section below covers running from source, intended for developers or users who need to modify the code.
+### 2.2 Run from Source (Developers / CLI / AI Agents)
 
-### 2.1 Environment Setup
-
-- **Python**: Recommended Python 3.10 – 3.12 (64-bit)
-- **Hardware**: NVIDIA GPU (CUDA supported) recommended for fast inference; CPU mode (multi-threading + dynamic quantization) is also supported.
+Requires Python 3.10–3.12 (64-bit).
 
 ```bash
-# 1. Clone repository
+# 1. Clone the repository
 git clone https://github.com/zxz1994/FA-ASMR.git
 cd FA-ASMR
 
-# 2. Install dependencies
+# 2. Install PyTorch 2.6.0 (choose CUDA or CPU)
+# CUDA 12.4:
+pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# Or CPU:
+# pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+
+# 3. Install core dependencies
 pip install -r requirements.txt
 
-# 3. Install the furigana model separately
-#    (its setup pulls in many unrelated dev dependencies, hence excluded from requirements)
+# 4. Install yomikata without extra dev dependencies
 pip install --no-deps yomikata
 ```
 
-> **PyTorch Recommendation**:
-> PyTorch 2.6.0 is recommended:
-> - **CUDA**: `pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124`
-> - **CPU**: `pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu`
+**Model Weights**:
 
-### 2.2 Model Weights
+| Weight File | Path | Notes |
+| :--- | :--- | :--- |
+| **MMS-FA Base Model** | `models/hub/checkpoints/model.pt` | ~1.2 GB; auto-downloaded on first run or placed manually for offline use |
+| **ASMR LoRA Adapter** | `lora/fa_asmr_v9e10.pt` | **Bundled in repo** (~12.2 MB), fine-tuned for whispered Japanese ASMR |
 
-| Model | Target Path | Description |
-|---|---|---|
-| **MMS-FA Base Model** (`model.pt`) | `models/hub/checkpoints/model.pt` | ~1.26 GB. Automatically downloaded on first run via `torchaudio.pipelines.MMS_FA`, or can be manually placed for complete offline usage. |
-| **ASMR LoRA Adapter** (`fa_asmr_v9e10.pt`) | `lora/fa_asmr_v9e10.pt` | **Included in repository** (~12.2 MB). Fine-tuned specifically on Japanese ASMR acoustics. |
-
-### 2.3 Launching the Application
-
-- **Windows**: Double-click `run.bat`
-- **Command Line**:
-  ```bash
-  python FA-ASMR_GUI.py
-  ```
+**Launch Desktop App**: double-click `run.bat` on Windows or run `python FA-ASMR_GUI.py`.
 
 ---
 
-## 3. Usage & Specifications
+## 3. AI Agent & CLI Automation
 
-### 3.1 GUI Workflow
+**FA-ASMR intentionally embeds zero LLM API keys or network calls**, keeping the acoustic core 100% offline and deterministic. For full end-to-end automation (*raw PDF/DOCX script extraction → forced alignment → DLsite background research & localized subtitle translation*), pair this repo with your preferred **AI Agent** (Antigravity, Claude Code, Codex, Cursor, Gemini CLI, etc.).
 
-1. **Drag-and-Drop**: Drag multiple scripts (`.txt`) and audio files directly into the window. Pairs are matched automatically by filename.
-2. **Card Task Management**: Drag up/down in the list to reorder or re-pair tasks. Pause, resume, or retry items individually.
-3. **Audio Formats Supported**: `.wav`, `.mp3`, `.flac`, `.m4a`, `.ogg`, `.aac`, `.opus`, `.wma`.
-4. **Key Options**:
-   - **Language**: Instant hot-switching between Simplified Chinese, Japanese, and English.
-   - **Alignment Mode**:
-     - *01 Standard Monotonic*: Ideal for solo voice acting and single audio tracks.
-     - *02 Multi-Speaker / Reordered*: Handles overlapping speech, multi-track mixing, and staggered script dialogue (script requires speaker annotations).
-     - *03 Multi-Perspective*: Operates atop multi-speaker engine for dual-perspective recordings, prioritizing acoustic-clear channels and exporting independent timelines.
-   - **Device**: Select `cuda` (GPU) or `cpu`. GPU mode uses optimal 3000-frame chunking + FP16 (~`3.74 GB` peak reserved VRAM, compatible with 4 GB+ GPUs); CPU mode automatically caps chunks at 2000 frames with INT8 dynamic quantization.
-   - **Line End Extension**: Adds a small natural delay to sentence end timestamps for more comfortable reading.
-   - **Ono Gate**: Enable to prune stretched/distorted acting onomatopoeia.
+The repository ships with a dedicated [`AGENTS.md`](AGENTS.md) operating guide and a headless CLI ([`fa_asmr_cli.py`](fa_asmr_cli.py)).
 
-### 3.2 Script Format & Pairing Conventions
+### 3.1 Handing the Workflow to an AI Agent
 
-- **Pairing Rules**:
-  - **Identical Stems**: `01_track.wav` pairs with `01_track.txt`.
-  - **Speaker Suffix**: Filenames ending with speaker tags (e.g., `01_track_〖Alice〗〖Bob〗.txt`) automatically strip the tag to match `01_track.wav` and register the speaker metadata.
-- **Content Guidelines**:
-  - Supports automatic detection of UTF-8, Shift-JIS, GB18030, and UTF-16.
-  - Remove non-vocal stage directions, track headers, and scene descriptions inside brackets.
-  - In-line speaker tags like `〖Name〗` or standalone `【Name】` headers will be preserved in the final LRC/SRT output.
+Point any terminal-capable AI Agent to this repository and your target work folder with a prompt like:
 
-### 3.3 Output Format
+> "Read `E:\FA-ASMR\AGENTS.md` and process `./RJ01234567` end-to-end: extract and clean the script, align with `fa_asmr_cli.py`, research the work's background/characters, and translate the aligned subtitles."
 
-The output `.lrc` and `.srt` files are written to the same directory as the audio file. Timestamps follow standard centisecond precision:
+Following [`AGENTS.md`](AGENTS.md), the Agent will:
+1. Extract and clean raw vertical/color-coded PDFs or text scripts and standardize `〖Speaker〗` markers;
+2. Semantically select single / multi-speaker / true multi-perspective mode, run `--dry-run` / `--verify-script` pre-checks, and execute `fa_asmr_cli.py --json`;
+3. Look up the work's background and character personas (e.g., via DLsite RJ code) and translate line-by-line directly on top of the engine's accurate timelines.
 
-- **LRC Format**:
-```text
-[00:05.58]わぁ...! ねぇ、見てみてっ!
-[00:08.62]
-[00:12.30]すっごくいい景色!
-[00:15.00]
+### 3.2 `fa_asmr_cli.py` Usage
+
+Default `--mode auto` automatically selects `multi_persp` when `--audio-b` or dual-POV pairs are detected, `multi_speaker` when ≥2 speakers are present in the script, and `single` otherwise:
+
+```bash
+# 1. Fast folder pairing & encoding pre-flight check (no model loaded)
+python fa_asmr_cli.py --batch ./work_dir --dry-run --json
+
+# 2. Deep single-script verification (runs AutoRuby, speaker normalization & clause stats)
+python fa_asmr_cli.py --verify-script ./01.txt --json
+
+# 3. Single-track alignment (JSON summary on stdout; progress logs on stderr)
+python fa_asmr_cli.py --audio ./01.flac --script ./01.txt --extend 1.0 --json
+
+# 4. Dual-perspective joint alignment
+python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt --json
+
+# 5. Batch directory alignment (reuses GPU memory across tracks, releases on exit)
+python fa_asmr_cli.py --batch ./work_dir --json
 ```
 
-- **SRT Format**: Contains accurate start and despawn timestamps with full speaker styling preserved.
-
-### 3.4 Advanced Configuration (`advanced_config.json`)
-
-Optional low-level system settings (read-only by GUI; edit manually if needed):
-- `cpu_threads`: CPU inference forward threads (`null` = auto-detect physical cores).
-- `quantize_int8`: Dynamic INT8 quantization for CPU mode.
-- `cpu_chunk_cap`: Maximum frame chunk cap in CPU mode (default: `2000`).
+> **Pre-built `.exe` users**: Headless CLI is also available via `FA-ASMR.exe --cli ... --json-out summary.json` (use `--json-out` in windowed builds where console stdout is suppressed).
 
 ---
 
-## 4. Architecture & Pipeline
+## 4. Desktop Usage & Script Conventions
 
-Repository module topology:
+* **Supported Audio Formats**: `.wav`, `.mp3`, `.flac`, `.m4a`, `.ogg`, `.aac`, `.opus`, `.wma`.
+* **Smart File Pairing**:
+  * Matching stems (`01_track.wav` + `01_track.txt` or `01_track〖Alice〗〖Bob〗.txt`);
+  * Dual-POV suffixes (`01_A.wav` / `01_B.wav`, `Track7‗主人公視点.wav` / `Track7‗夫視点.wav`) auto-group with the shared script.
+* **Script Guidelines**:
+  * Any standard encoding (UTF-8 / UTF-8-BOM / Shift-JIS(CP932) / GB18030 / UTF-16) is read automatically;
+  * Strip non-spoken stage/SE notes; convert inline `漢字（かんじ）` readings to `{漢字|かんじ}` or remove the parenthesized reading;
+  * Mark speakers with `〖Name〗` (standalone line or inline, simultaneous speech as `〖A〗〖B〗せーの！`) or recurring standalone `【Name】` header lines.
+* **Outputs**: Writes `.lrc` (with `Name：` prefixes) and `.srt` (with per-speaker independent timelines and `【Name】` prefixes) beside each audio file.
+* **Advanced Hardware Config (`advanced_config.json`)**: Optional read-only tuning for `cpu_threads`, `quantize_int8`, and `cpu_chunk_cap` (default `2000`).
+
+---
+
+## 5. Architecture & Regression Tests
 
 ```text
 FA-ASMR/
-├── assets/                     # GUI banners, mascot icons, and UI preview
-│   ├── asmr_banner.jpg
-│   ├── asmr_mascot.png
-│   ├── mascot_icon.png
-│   └── ui_preview.png
-├── furigana/                   # Japanese furigana / phoneme conversion
-│   ├── fa_asmr_converter.py    # 3-tier furigana generator & Unicode radical fixer
-│   └── overrides.json          # Heteronym & reading override dictionary
-├── lora/                       # Specialized model adapters
-│   └── fa_asmr_v9e10.pt        # Production-grade ASMR LoRA weights
-├── advanced_config.json        # Advanced system settings
-├── advanced_config.py          # Configuration loader
-├── align.py                    # Alignment pipeline orchestrator
-├── align_acoustic.py           # RMS, noise floor, and binaural Better-Ear fusion
-├── align_model.py              # MMS-FA loader, LoRA injection & dynamic quantization
-├── align_multiperspective.py   # Multi-perspective joint alignment engine (NEW)
-├── align_multispeaker.py       # Multi-speaker / scrambled script alignment engine (NEW)
-├── align_post.py               # Post-processing, silence snap & timestamp monotonicity
-├── align_trellis.py            # Constrained CTC Trellis Viterbi aligner (Numba JIT)
-├── align_utils.py              # Normalization, prolonged sound folding, time formatting
-├── clause.py                   # Data contract constants (F) & clause boundaries
-├── FA-ASMR_GUI.py              # Application main entry & batch scheduler
-├── fa_asmr_ui.py               # Decoupled Sakura-Light card stream UI (NEW)
-├── fa_asmr_i18n.py             # Trilingual i18n support module (NEW)
-├── fa_asmr_settings.json       # GUI settings persistence
-├── haruraw2norm.py             # Kanji/Kana/Romaji to MMS-FA phoneme converter
-├── inline_leak_clean.py        # Inline ruby residue cleaner
-├── lrc_end_extend.py           # Subtitle despawn extension
-├── merge_short.py              # Acoustic-pause-driven short clause merger
-├── np_compat.py                # NumPy 2.x compatibility shim
-├── ono_base.py                 # Onomatopoeia pattern recognition
-├── ono_block_corpus.py         # Onomatopoeia blacklist
-├── ono_filter.py               # Multi-stage onomatopoeia gatekeeper
-├── resegment.py                # Punctuation-driven acoustic resegmentation
-├── torch_bootstrap.py          # PyTorch environment detection and bootstrapping
-├── build_in_ci.py              # Automated build & packaging script
-├── FA-ASMR.spec                # PyInstaller packaging specification
-├── requirements.txt            # Python dependencies
-└── run.bat                     # Windows one-click launcher
+├── AGENTS.md                   # End-to-end AI Agent operating & maintenance guide
+├── fa_asmr_cli.py              # Headless CLI (--mode auto / --dry-run / --verify-script / --json)
+├── fa_asmr_pipeline.py         # Non-GUI core pipeline, encoding detection, LRC/SRT & auto-pairing
+├── FA-ASMR_GUI.py              # Desktop launcher, --cli router & --self-test verification
+├── fa_asmr_ui.py               # Obsidian Acoustic Console dark studio UI
+├── fa_asmr_i18n.py             # ZH / JA / EN hot-switchable localization
+├── align.py                    # Single-track acoustic alignment engine
+├── align_multispeaker.py       # Multi-speaker / reordered / STFT solo-mask engine
+├── align_multiperspective.py   # Dual-perspective joint calibration & projection engine
+├── align_trellis.py            # Global constrained CTC Viterbi decoder (Numba JIT)
+├── align_acoustic.py           # Frame RMS, noise floor & binaural Better-Ear mixture
+├── align_model.py              # MMS-FA loader, LoRA injection, FP16 / INT8 inference
+├── align_post.py               # Silence snapping, timestamp mapping & monotonicity
+├── clause.py                   # Shared data contract (F), clause boundaries & comma bridging
+├── haruraw2norm.py             # Japanese kanji/kana/romaji to MMS-FA phoneme converter
+├── inline_leak_clean.py        # Inline furigana leak cleaner
+├── ono_base.py / ono_filter.py / ono_block_corpus.py  # Multi-stage ONO gate & real-word protection
+├── resegment.py / merge_short.py / lrc_end_extend.py  # Resegmentation, short-line merge & tail extend
+├── furigana/                   # 3-tier Japanese furigana annotator & heteronym overrides
+├── lora/fa_asmr_v9e10.pt       # Bundled ASMR-specialized LoRA weights
+├── tests/                      # Zero-dependency regression suite (stdlib unittest)
+└── build_in_ci.py / FA-ASMR.spec  # GitHub Actions Windows CPU & CUDA release packaging
+```
+
+Run the regression test suite (zero external test dependencies):
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
 ---
 
-## 5. License & Acknowledgements
+## 6. License & Acknowledgments
 
-This project is licensed under the MIT License.
-- Base forced alignment framework references Meta's MMS-FA (Massively Multilingual Speech) paradigm.
-- Japanese phoneme analysis integrates Fugashi (UniDic), yomikata, and PyKakasi.
+Released under the **MIT License**.
+* Acoustic alignment foundation based on [Meta MMS-FA](https://pytorch.org/audio/stable/tutorials/forced_alignment_for_multilingual_data_tutorial.html)
+* Japanese tokenization & furigana powered by [Fugashi (UniDic)](https://github.com/polm/fugashi), [yomikata](https://github.com/passaglia/yomikata), and [PyKakasi](https://github.com/miurahr/pykakasi)

@@ -38,7 +38,8 @@ def parse_ts(s):
         return None
     mm = int(m.group(1))
     ss = int(m.group(2))
-    cc = int(m.group(3) or 0)
+    raw_frac = m.group(3)
+    cc = int(raw_frac.ljust(2, "0")[:2]) if raw_frac else 0
     return mm * 60 + ss + cc / 100.0
 
 

@@ -1,62 +1,281 @@
 # -*- coding: utf-8 -*-
-"""FA-ASMR 桌面界面。与强制对齐管线解耦，仅负责交互与状态展示。
-支持卡片式流式对齐工作台、界面内直接拖拽互换/调配、多语言即时热切换。
+"""FA-ASMR Acoustic Mastering Console — 全新桌面前端界面。
+
+与强制对齐管线完全解耦，仅通过 build_ui(ctx) 接入业务回调。
+采用暗色专业音频控制台架构：左侧控制导轨 + 中央多轨编排矩阵 + 底部走带与实时终端。
+支持三模式即时切换、界面内外拖拽配对/互换、多语言热切换与配置自动持久化。
 """
 from __future__ import annotations
 
+import json
+import math
 import os
 import queue
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from fa_asmr_i18n import (
     I18N,
-    tr,
-    LANG_NAMES,
     LANG_MAP,
+    LANG_NAMES,
     detect_system_lang,
+    tr,
 )
 
-BG = "#f5f2f0"
-PANEL = "#fffdfc"
-SURFACE = "#f2eeee"
-SURFACE_HOVER = "#eae3e5"
-SURFACE_ACTIVE = "#e4dade"
-TEXT = "#2d282c"
-MUTED = "#756d74"
-SUBTLE = "#9a9197"
-BORDER = "#dfd7da"
-BORDER_DASHED = "#e2b8c9"
-PINK = "#b9587f"
-PINK_HOVER = "#a94770"
-PINK_DARK = "#f5e2e9"
-PINK_BG = "#fff6f9"
-LAVENDER = "#8875aa"
-MINT = "#397d64"
-AMBER = "#97651f"
-RED = "#bd4f61"
-INK = "#fffafc"
+# ══════════════════════════════════════════════════════════════════════════
+#  色板与排版系统 — Obsidian Acoustic Console
+# ══════════════════════════════════════════════════════════════════════════
+
+BG_APP = "#0B0D12"
+BG_RAIL = "#11151D"
+BG_STAGE = "#0D1017"
+BG_PANEL = "#151A24"
+BG_PANEL_ALT = "#12161F"
+BG_SLOT = "#1A2130"
+BG_SLOT_HOVER = "#232D40"
+BG_SLOT_EMPTY = "#121722"
+BG_CONSOLE = "#080A0E"
+
+BORDER = "#222B3B"
+BORDER_SUBTLE = "#1B2230"
+BORDER_STRONG = "#334155"
+
+ACCENT = "#0EA5E9"
+ACCENT_HOVER = "#38BDF8"
+ACCENT_DIM = "#0F293B"
+ACCENT_GLOW = "#7DD3FC"
+
+AMBER = "#F59E0B"
+AMBER_HOVER = "#FBBF24"
+AMBER_DIM = "#292011"
+
+EMERALD = "#10B981"
+EMERALD_DIM = "#0E2920"
+
+CRIMSON = "#F43F5E"
+CRIMSON_DIM = "#2E131B"
+
+TEXT_PRI = "#F1F5F9"
+TEXT_SEC = "#94A3B8"
+TEXT_MUTED = "#64748B"
+INK_DARK = "#04111A"
+
 FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
 
 DEFAULT_VRAM_CHUNK = 3000
 
+# 本地补充文案（覆盖原 UI 中未入字典的细粒度操作文案，保证中/日/英 100% 同步）
+_EXTRA_I18N = {
+    "import_files": {"zh": "＋ 导入素材", "ja": "＋ ファイル追加", "en": "+ Import"},
+    "auto_pair": {"zh": "自动配对", "ja": "自動ペアリング", "en": "Auto-Pair"},
+    "new_track_drop": {
+        "zh": "＋ 拖拽素材至此创建新轨道，或点击导入文件",
+        "ja": "＋ ここにドロップして新規トラック作成、またはクリックして追加",
+        "en": "+ Drop files here to create a new track, or click to import",
+    },
+    "empty_sub": {
+        "zh": "支持 .txt 台本与 .wav / .flac / .mp3 / .m4a / .ogg 音频 · 按文件名自动匹配",
+        "ja": ".txt 台本と .wav / .flac / .mp3 / .m4a / .ogg 音声に対応 · ファイル名で自動照合",
+        "en": "Supports .txt scripts & .wav / .flac / .mp3 / .m4a / .ogg · Auto-matched by filename",
+    },
+    "rail_section_engine": {"zh": "对齐引擎", "ja": "エンジンモード", "en": "ENGINE MODE"},
+    "rail_section_params": {"zh": "运行参数", "ja": "パラメータ", "en": "PARAMETERS"},
+    "rail_section_sys": {"zh": "系统与规范", "ja": "システム", "en": "SYSTEM"},
+    "kpi_total": {"zh": "总计", "ja": "合計", "en": "TOTAL"},
+    "kpi_ready": {"zh": "就绪", "ja": "準備完了", "en": "READY"},
+    "kpi_done": {"zh": "完成", "ja": "完了", "en": "DONE"},
+    "col_act": {"zh": "操作", "ja": "操作", "en": "ACT"},
+    "console_btn": {"zh": "终端日志", "ja": "ログ", "en": "CONSOLE"},
+    "console_header": {"zh": "实时管线输出", "ja": "パイプライン出力", "en": "PIPELINE CONSOLE"},
+    "pick_script_title": {"zh": "选择台本文件", "ja": "台本ファイルを選択", "en": "Select Script File"},
+    "pick_audio_title": {"zh": "选择音频文件", "ja": "音声ファイルを選択", "en": "Select Audio File"},
+    "pick_audio_b_title": {"zh": "选择副视角音频文件", "ja": "視点 B 音声を選択", "en": "Select Perspective B Audio"},
+    "tip_open": {"zh": "打开输出字幕或所在目录", "ja": "字幕またはフォルダを開く", "en": "Open subtitle or folder"},
+    "tip_retry": {"zh": "重新加入待对齐队列", "ja": "再実行キューへ戻す", "en": "Re-queue for alignment"},
+    "tip_remove": {"zh": "移除此轨道", "ja": "トラックを削除", "en": "Remove track"},
+    "untitled_track": {"zh": "未命名轨道", "ja": "名称未設定", "en": "Untitled Track"},
+    "cuda_badge": {"zh": "CUDA FP16", "ja": "CUDA FP16", "en": "CUDA FP16"},
+    "cpu_badge": {"zh": "CPU MODE", "ja": "CPU MODE", "en": "CPU MODE"},
+    "dnd_hint": {"zh": "支持拖拽导入与槽位互换", "ja": "D&D・スロット入替対応", "en": "Drag & Drop · Slot Swap"},
+}
 
-def get_status_icon(status_key: str) -> str:
-    key_map = {
-        "pending": "status_pending",
-        "running": "status_running",
-        "done": "status_done",
-        "failed": "status_failed",
-        "warn": "status_warn",
-    }
-    return tr(key_map.get(status_key, "status_pending"))
 
+def _etr(key: str) -> str:
+    entry = _EXTRA_I18N.get(key)
+    if not entry:
+        return key
+    return entry.get(I18N.current_lang, entry.get("zh", key))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  高分屏 (4K / High-DPI) 原生感知与等比缩放系统
+# ══════════════════════════════════════════════════════════════════════════
+
+_UI_SCALE: float = 1.0
+_DPI_ENABLED: bool = False
+
+
+def enable_windows_dpi_awareness() -> None:
+    """在创建 Tk() 之前启用 Windows Per-Monitor V2 DPI 感知，消除 4K 拉伸发糊。"""
+    global _DPI_ENABLED
+    if _DPI_ENABLED or sys.platform != "win32":
+        return
+    _DPI_ENABLED = True
+    try:
+        import ctypes
+        # Win10 1703+ Per-Monitor V2 (-4)
+        res = ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        if res:
+            return
+    except Exception:
+        pass
+    try:
+        import ctypes
+        # Win8.1+ Per-Monitor (2) -> System (1)
+        for mode in (2, 1):
+            if ctypes.windll.shcore.SetProcessDpiAwareness(mode) == 0:
+                return
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def _detect_window_dpi(root: tk.Misc) -> float:
+    """读取当前窗口所在显示器的真实 DPI（默认 96.0；4K 150%=144 / 200%=192）。"""
+    env_dpi = os.environ.get("FA_ASMR_TEST_DPI", "").strip()
+    if env_dpi:
+        try:
+            v = float(env_dpi)
+            if 72.0 <= v <= 384.0:
+                return v
+        except ValueError:
+            pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) or root.winfo_id()
+            if hasattr(ctypes.windll.user32, "GetDpiForWindow"):
+                dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+                if dpi and dpi >= 72:
+                    return float(dpi)
+        except Exception:
+            pass
+        try:
+            import ctypes
+            hdc = ctypes.windll.user32.GetDC(0)
+            if hdc:
+                dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+                ctypes.windll.user32.ReleaseDC(0, hdc)
+                if dpi and dpi >= 72:
+                    return float(dpi)
+        except Exception:
+            pass
+    try:
+        return max(72.0, float(root.winfo_fpixels("1i")))
+    except Exception:
+        return 96.0
+
+
+def _init_dpi_scaling(root: tk.Misc) -> float:
+    """同步 Tk 内部字体点距缩放与全局像素缩放倍率 _UI_SCALE。"""
+    global _UI_SCALE
+    dpi = _detect_window_dpi(root)
+    _UI_SCALE = max(1.0, round(dpi / 96.0, 3))
+    try:
+        # 让所有点值字号 (pt) 与物理像素缩放倍率严格对齐
+        root.tk.call("tk", "scaling", dpi / 72.0)
+    except Exception:
+        pass
+    return _UI_SCALE
+
+
+def _s(px: float) -> int:
+    """按当前屏幕 DPI 倍率缩放像素整数。"""
+    if px == 0:
+        return 0
+    val = int(round(px * _UI_SCALE))
+    return max(1, val) if px > 0 else min(-1, val)
+
+
+def _sf(px: float) -> float:
+    """按当前屏幕 DPI 倍率缩放像素浮点。"""
+    return float(px) * _UI_SCALE
+
+
+def _apply_dark_titlebar(win: tk.Misc) -> None:
+    """Windows 10/11 原生深色标题栏适配（失败静默降级）。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        if not hwnd:
+            hwnd = win.winfo_id()
+        val = ctypes.c_int(1)
+        for attr in (20, 19):
+            res = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)
+            )
+            if res == 0:
+                break
+    except Exception:
+        pass
+
+
+def _build_studio_icon(root: tk.Misc, pil_ok: bool) -> None:
+    """用 Pillow 4× 超采样绘制高清示波器窗口图标，适配 4K 标题栏与任务栏。"""
+    if not pil_ok:
+        return
+    try:
+        from PIL import Image, ImageDraw, ImageTk
+
+        hi = 256
+        im = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(im)
+        draw.rounded_rectangle((8, 8, hi - 9, hi - 9), radius=56,
+                               fill=(14, 18, 26, 255), outline=(56, 189, 248, 235), width=8)
+        bars = [48, 96, 152, 80, 176, 120, 64]
+        bx = 48
+        for idx, bh in enumerate(bars):
+            y0 = (hi - bh) // 2
+            y1 = y0 + bh
+            col = (56, 189, 248, 255) if idx % 2 == 0 else (245, 158, 11, 245)
+            draw.rounded_rectangle((bx, y0, bx + 16, y1), radius=8, fill=col)
+            bx += 24
+        im64 = im.resize((64, 64), Image.LANCZOS)
+        im32 = im.resize((32, 32), Image.LANCZOS)
+        p64 = ImageTk.PhotoImage(im64)
+        p32 = ImageTk.PhotoImage(im32)
+        root._icon_photos = (p64, p32)
+        root.wm_iconphoto(True, p64, p32)
+    except Exception:
+        pass
+
+
+def _truncate_filename(name: str, max_len: int = 24) -> str:
+    if len(name) <= max_len:
+        return name
+    head = max(6, max_len - 8)
+    return name[:head] + "…" + name[-7:]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  自定义暗色控件：ToolTip / ToggleSwitch / SegmentedControl / Oscilloscope
+# ══════════════════════════════════════════════════════════════════════════
 
 class ToolTip:
-    """轻量悬停提示。"""
+    """暗色控制台风格轻量悬停提示。"""
 
-    def __init__(self, widget, text):
+    def __init__(self, widget: tk.Widget, text: str):
         self.widget = widget
         self.text = text
         self.window = None
@@ -64,124 +283,499 @@ class ToolTip:
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
 
+    def set_text(self, text: str) -> None:
+        self.text = text
+
     def _show(self, _event=None):
         if self.window or not self.text:
             return
-        self.window = tk.Toplevel(self.widget)
-        self.window.wm_overrideredirect(True)
-        self.window.wm_geometry(f"+{self.widget.winfo_rootx()}+{self.widget.winfo_rooty() + 28}")
-        tk.Label(self.window, text=self.text, bg=SURFACE_ACTIVE, fg=TEXT,
-                 font=(FONT, 8), padx=10, pady=6, justify=tk.LEFT).pack()
+        try:
+            self.window = tk.Toplevel(self.widget)
+            self.window.wm_overrideredirect(True)
+            self.window.attributes("-topmost", True)
+            x = self.widget.winfo_rootx() + _s(6)
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + _s(6)
+            self.window.wm_geometry(f"+{x}+{y}")
+            frame = tk.Frame(self.window, bg="#1E293B", highlightbackground=BORDER_STRONG,
+                             highlightthickness=1)
+            frame.pack()
+            tk.Label(frame, text=self.text, bg="#1E293B", fg=TEXT_PRI,
+                     font=(MONO if "\\" in self.text or "/" in self.text else FONT, 8),
+                     padx=_s(10), pady=_s(5), justify=tk.LEFT).pack()
+        except tk.TclError:
+            self._hide()
 
     def _hide(self, _event=None):
         if self.window:
-            self.window.destroy()
+            try:
+                self.window.destroy()
+            except tk.TclError:
+                pass
             self.window = None
 
 
+class ToggleSwitch(tk.Canvas):
+    """自定义滑动胶囊开关（高分屏优先 4× PIL 超采样抗锯齿，无 PIL 时平滑降级）。"""
+
+    def __init__(self, parent, variable: tk.BooleanVar, command=None, bg=BG_RAIL, pil_ok: bool = True):
+        self._sw = _s(42)
+        self._sh = _s(22)
+        super().__init__(parent, width=self._sw, height=self._sh, bg=bg, bd=0,
+                         highlightthickness=0, cursor="hand2")
+        self._var = variable
+        self._cmd = command
+        self._bg = bg
+        self._pil_ok = pil_ok
+        self._disabled = False
+        self._hover = False
+        self._photo_cache: dict[tuple, object] = {}
+        self.bind("<Button-1>", self._toggle)
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.redraw()
+
+    def set_disabled(self, disabled: bool) -> None:
+        self._disabled = disabled
+        self.configure(cursor="" if disabled else "hand2")
+        self.redraw()
+
+    def _set_hover(self, h: bool) -> None:
+        self._hover = h
+        self.redraw()
+
+    def _toggle(self, _event=None):
+        if self._disabled:
+            return
+        self._var.set(not self._var.get())
+        self.redraw()
+        if self._cmd:
+            self._cmd()
+
+    @staticmethod
+    def _hex_rgba(hx: str) -> tuple[int, int, int, int]:
+        hx = hx.lstrip("#")
+        return (int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16), 255)
+
+    def redraw(self):
+        self.delete("all")
+        on = bool(self._var.get())
+        if self._disabled:
+            track = "#1E2533"
+            knob = "#475569"
+        else:
+            track = (ACCENT_HOVER if self._hover else ACCENT) if on else ("#2A3448" if self._hover else "#21293A")
+            knob = "#F8FAFC"
+
+        if self._pil_ok:
+            key = (on, self._disabled, self._hover, self._sw, self._sh)
+            photo = self._photo_cache.get(key)
+            if photo is None:
+                try:
+                    from PIL import Image, ImageDraw, ImageTk
+                    ss = 4
+                    W, H = self._sw * ss, self._sh * ss
+                    pad = max(2, int(round(ss * _UI_SCALE)))
+                    im = Image.new("RGBA", (W, H), self._hex_rgba(self._bg))
+                    d = ImageDraw.Draw(im)
+                    rad = (H - 2 * pad) // 2
+                    d.rounded_rectangle((pad, pad, W - pad - 1, H - pad - 1),
+                                        radius=rad, fill=self._hex_rgba(track))
+                    kr = int(round((H - 2 * pad) * 0.36))
+                    cy = H // 2
+                    cx = (W - pad - rad) if on else (pad + rad)
+                    d.ellipse((cx - kr, cy - kr, cx + kr, cy + kr), fill=self._hex_rgba(knob))
+                    im_out = im.resize((self._sw, self._sh), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(im_out)
+                    self._photo_cache[key] = photo
+                except Exception:
+                    self._pil_ok = False
+                    photo = None
+            if photo is not None:
+                self.create_image(0, 0, anchor="nw", image=photo)
+                return
+
+        # 无 PIL 时的等比 Canvas 回退绘制
+        pad = _s(1)
+        r = (self._sh - 2 * pad) // 2
+        self.create_oval(pad, pad, pad + 2 * r, pad + 2 * r, fill=track, outline="")
+        self.create_oval(self._sw - pad - 2 * r, pad, self._sw - pad, pad + 2 * r, fill=track, outline="")
+        self.create_rectangle(pad + r, pad, self._sw - pad - r, pad + 2 * r, fill=track, outline="")
+        kr = _s(7)
+        cx = (self._sw - pad - r) if on else (pad + r)
+        cy = self._sh // 2
+        self.create_oval(cx - kr, cy - kr, cx + kr, cy + kr, fill=knob, outline="")
+
+
+class SegmentedControl(tk.Frame):
+    """横向分段胶囊选择器，用于设备切换（CUDA/CPU）与语言切换（中/日/EN）。"""
+
+    def __init__(self, parent, options, value: str, on_change, bg=BG_APP):
+        super().__init__(parent, bg=bg, highlightbackground=BORDER, highlightthickness=1,
+                         padx=_s(2), pady=_s(2))
+        self._seg_items = list(options)  # [(key, label), ...]
+        self._value = value
+        self._on_change = on_change
+        self._disabled_keys: set[str] = set()
+        self._disabled_all: bool = False
+        self._buttons: dict[str, tk.Label] = {}
+        self._build()
+
+    def _build(self):
+        for w in self.winfo_children():
+            w.destroy()
+        self._buttons.clear()
+        for idx, (key, label) in enumerate(self._seg_items):
+            lbl = tk.Label(self, text=label, font=(FONT, 8, "bold"),
+                           pady=_s(5), padx=_s(6), cursor="hand2")
+            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0 if idx == 0 else _s(2), 0))
+            lbl.bind("<Button-1>", lambda _e, k=key: self._select(k))
+            lbl.bind("<Enter>", lambda _e, k=key: self._paint(hover_key=k))
+            lbl.bind("<Leave>", lambda _e: self._paint())
+            self._buttons[key] = lbl
+        self._paint()
+
+    def set_disabled_keys(self, keys) -> None:
+        self._disabled_keys = set(keys)
+        self._paint()
+
+    def set_disabled(self, disabled: bool) -> None:
+        self._disabled_all = bool(disabled)
+        self._paint()
+
+    def set_value(self, value: str) -> None:
+        self._value = value
+        self._paint()
+
+    def _select(self, key: str):
+        if self._disabled_all or key in self._disabled_keys or key == self._value:
+            return
+        self._value = key
+        self._paint()
+        if self._on_change:
+            self._on_change(key)
+
+    def _paint(self, hover_key: str | None = None):
+        for key, lbl in self._buttons.items():
+            if self._disabled_all or key in self._disabled_keys:
+                if key == self._value:
+                    lbl.configure(bg="#132230", fg="#4F708A", cursor="")
+                else:
+                    lbl.configure(bg=BG_APP, fg="#3B4559", cursor="")
+            elif key == self._value:
+                lbl.configure(bg=ACCENT_DIM, fg=ACCENT_HOVER, cursor="hand2")
+            elif key == hover_key:
+                lbl.configure(bg=BG_SLOT, fg=TEXT_PRI, cursor="hand2")
+            else:
+                lbl.configure(bg=BG_APP, fg=TEXT_MUTED, cursor="hand2")
+
+
+class OscilloscopeHeader(tk.Canvas):
+    """左侧导轨顶部：双声道示波器美学抬头 + 版本与硬件遥测（全 DPI 自适应测量，零重叠）。"""
+
+    def __init__(self, parent, cuda_ok: bool):
+        super().__init__(parent, height=_s(84), bg="#0D1118", bd=0, highlightthickness=0)
+        self._cuda_ok = cuda_ok
+        self._phase = 0.0
+        self._running = False
+        self._after_id = None
+        self.bind("<Configure>", lambda _e: self.redraw())
+
+    def set_running(self, running: bool) -> None:
+        self._running = running
+        if running and self._after_id is None:
+            self._tick()
+        elif not running and self._after_id is not None:
+            try:
+                self.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+            self.redraw()
+
+    def stop(self) -> None:
+        self._running = False
+        if self._after_id is not None:
+            try:
+                self.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _tick(self):
+        if not self._running:
+            self._after_id = None
+            return
+        self._phase += 0.24
+        self.redraw()
+        try:
+            self._after_id = self.after(65, self._tick)
+        except tk.TclError:
+            self._after_id = None
+
+    def redraw(self):
+        self.delete("all")
+        w = max(self.winfo_width(), _s(240))
+        h = max(self.winfo_height(), _s(84))
+
+        # 微弱示波器网格线（置于底部波段，与抬头文案零重叠）
+        mid_y = int(h * 0.78)
+        self.create_line(0, mid_y, w, mid_y, fill="#182030", width=1)
+        grid_step = _s(36)
+        tick_h = _s(10)
+        for gx in range(_s(28), w, grid_step):
+            self.create_line(gx, mid_y - tick_h, gx, mid_y + tick_h, fill="#141B27", width=1)
+
+        # 双声道立体声包络曲线（L = Cyan, R = Amber）
+        amp = _sf(10.5 if self._running else 6.5)
+        pts_l = []
+        pts_r = []
+        step = max(3, _s(5))
+        for x in range(0, w + step, step):
+            u = min(1.0, x / max(w, 1))
+            env = max(0.0, math.sin(u * math.pi)) ** 1.3
+            yl = mid_y + math.sin(u * 15.0 + self._phase) * math.cos(u * 5.0 - self._phase * 0.4) * amp * env
+            yr = mid_y + math.sin(u * 12.0 - self._phase * 0.8 + 1.2) * (amp * 0.72) * env
+            pts_l.extend((x, yl))
+            pts_r.extend((x, yr))
+        if len(pts_r) >= 4:
+            self.create_line(*pts_r, fill="#63481A" if not self._running else "#D97706",
+                             width=max(1.0, _sf(1.2)), smooth=True)
+        if len(pts_l) >= 4:
+            self.create_line(*pts_l, fill="#1E5878" if not self._running else ACCENT_HOVER,
+                             width=max(1.2, _sf(1.6)), smooth=True)
+
+        # 品牌字标（实时测量 bbox 放置版本号，避免任何 DPI 下文字重叠）
+        pad_x = _s(14)
+        top_y = _s(13)
+        brand_id = self.create_text(pad_x, top_y, anchor="nw", text="FA-ASMR", fill=TEXT_PRI,
+                                    font=(MONO, 13, "bold"))
+        bb = self.bbox(brand_id) or (pad_x, top_y, pad_x + _s(84), top_y + _s(20))
+        mid_row = (bb[1] + bb[3]) // 2
+
+        ver = tr("banner_badge")
+        vx0 = bb[2] + _s(8)
+        ver_txt_id = self.create_text(vx0 + _s(6), mid_row, anchor="w", text=ver,
+                                      fill=ACCENT_HOVER, font=(MONO, 8, "bold"))
+        vbb = self.bbox(ver_txt_id) or (vx0 + _s(6), mid_row - _s(7), vx0 + _s(44), mid_row + _s(7))
+        v_rect = self.create_rectangle(vbb[0] - _s(5), vbb[1] - _s(2), vbb[2] + _s(5), vbb[3] + _s(2),
+                                       fill=ACCENT_DIM, outline="#1C4F6E", width=1)
+        self.tag_lower(v_rect, ver_txt_id)
+
+        # 硬件状态 LED 胶囊（右对齐动态测量宽度）
+        hw_color = EMERALD if self._cuda_ok else AMBER
+        hw_bg = EMERALD_DIM if self._cuda_ok else AMBER_DIM
+        hw_txt = _etr("cuda_badge") if self._cuda_ok else _etr("cpu_badge")
+        rx = w - pad_x
+        hw_txt_id = self.create_text(rx - _s(6), mid_row, anchor="e", text=hw_txt,
+                                     fill=hw_color, font=(MONO, 7, "bold"))
+        hbb = self.bbox(hw_txt_id) or (rx - _s(68), mid_row - _s(6), rx - _s(6), mid_row + _s(6))
+        dot_r = _s(3)
+        pill_x0 = hbb[0] - _s(14)
+        pill_y0 = hbb[1] - _s(3)
+        pill_y1 = hbb[3] + _s(3)
+        hw_rect = self.create_rectangle(pill_x0, pill_y0, rx, pill_y1,
+                                        fill=hw_bg, outline=hw_color, width=1)
+        self.tag_lower(hw_rect, hw_txt_id)
+        dot_cx = pill_x0 + _s(7)
+        self.create_oval(dot_cx - dot_r, mid_row - dot_r, dot_cx + dot_r, mid_row + dot_r,
+                         fill=hw_color, outline="")
+
+        # 副标题
+        self.create_text(pad_x, bb[3] + _s(4), anchor="nw", text=tr("banner_subtitle"),
+                         fill=TEXT_SEC, font=(FONT, 8))
+        # 底部分割线
+        self.create_line(0, h - 1, w, h - 1, fill=BORDER, width=1)
+
+
+class TransportProgressCanvas(tk.Canvas):
+    """底部走带栏：平滑进度条 + 运行中 10 段频谱电平条。"""
+
+    def __init__(self, parent):
+        super().__init__(parent, height=_s(18), bg=BG_RAIL, bd=0, highlightthickness=0)
+        self._value = 0.0
+        self._running = False
+        self._phase = 0.0
+        self._after_id = None
+        self.bind("<Configure>", lambda _e: self.redraw())
+
+    def set_value(self, value: float) -> None:
+        self._value = max(0.0, min(100.0, float(value)))
+        self.redraw()
+
+    def set_running(self, running: bool) -> None:
+        self._running = running
+        if running and self._after_id is None:
+            self._tick()
+        elif not running and self._after_id is not None:
+            try:
+                self.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+            self.redraw()
+
+    def stop(self) -> None:
+        self._running = False
+        if self._after_id is not None:
+            try:
+                self.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _tick(self):
+        if not self._running:
+            self._after_id = None
+            return
+        self._phase += 0.38
+        self.redraw()
+        try:
+            self._after_id = self.after(75, self._tick)
+        except tk.TclError:
+            self._after_id = None
+
+    def redraw(self):
+        self.delete("all")
+        w = max(self.winfo_width(), _s(160))
+        h = max(self.winfo_height(), _s(18))
+
+        # 右侧预留等比空间给迷你频谱电平条
+        pitch = _s(5)
+        bar_thick = _s(3)
+        meter_w = pitch * 10
+        gap = _s(14)
+        bar_w = max(_s(60), w - meter_w - gap)
+        y0, y1 = _s(6), _s(12)
+        self.create_rectangle(0, y0, bar_w, y1, fill="#1A2232", outline="")
+        fill_w = int(bar_w * (self._value / 100.0))
+        if fill_w > 0:
+            col = EMERALD if (self._value >= 100.0 and not self._running) else ACCENT
+            self.create_rectangle(0, y0, fill_w, y1, fill=col, outline="")
+            if fill_w > _s(4):
+                cap = "#6EE7B7" if col == EMERALD else ACCENT_GLOW
+                self.create_rectangle(fill_w - _s(3), y0, fill_w, y1, fill=cap, outline="")
+
+        # 10 段实时声学电平
+        mx = bar_w + gap
+        min_bh = _s(3)
+        margin_b = _s(2)
+        for idx in range(10):
+            if self._running:
+                lv = 0.25 + 0.75 * abs(math.sin(self._phase + idx * 0.65))
+                bh = max(min_bh, int(lv * (h - _s(4))))
+                c = ACCENT_HOVER if idx < 7 else AMBER
+            else:
+                bh = min_bh
+                c = "#232D40"
+            bx = mx + idx * pitch
+            self.create_rectangle(bx, h - margin_b - bh, bx + bar_thick, h - margin_b, fill=c, outline="")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  暗色台本规范指南弹窗
+# ══════════════════════════════════════════════════════════════════════════
+
 def show_script_help_dialog(parent):
-    """显示台本格式与规范指南弹窗。"""
+    """暗色控制台风格的台本格式与规范指南弹窗。"""
     dlg = tk.Toplevel(parent)
     dlg.title(tr("guide_dlg_window_title"))
-    dlg.geometry("680x600")
-    dlg.minsize(560, 480)
-    dlg.configure(bg=PANEL)
+    sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+    dw = min(_s(720), int(sw * 0.85))
+    dh = min(_s(620), int(sh * 0.85))
+    dlg.geometry(f"{dw}x{dh}")
+    dlg.minsize(min(_s(580), dw), min(_s(480), dh))
+    dlg.configure(bg=BG_RAIL)
     dlg.transient(parent)
     dlg.grab_set()
     dlg.update_idletasks()
-    dlg.geometry(f"+{parent.winfo_x() + max(0, (parent.winfo_width() - 680) // 2)}"
-                 f"+{parent.winfo_y() + max(0, (parent.winfo_height() - 600) // 2)}")
+    px = parent.winfo_x() + max(0, (parent.winfo_width() - dw) // 2)
+    py = parent.winfo_y() + max(0, (parent.winfo_height() - dh) // 2)
+    dlg.geometry(f"+{px}+{py}")
+    _apply_dark_titlebar(dlg)
 
-    pad = tk.Frame(dlg, bg=PANEL)
-    pad.pack(fill=tk.BOTH, expand=True, padx=26, pady=22)
-    tk.Label(pad, text=tr("guide_dlg_heading"), font=(FONT, 16, "bold"),
-             fg=TEXT, bg=PANEL).pack(anchor="w")
-    tk.Label(pad, text=tr("guide_dlg_subheading"),
-             font=(FONT, 9), fg=MUTED, bg=PANEL).pack(anchor="w", pady=(4, 16))
-    txt_box = tk.Text(pad, bg="#fffdfc", fg="#1f1a1e", font=(FONT, 10), relief=tk.FLAT,
-                      highlightbackground=BORDER, highlightthickness=1,
-                      wrap=tk.WORD, padx=16, pady=14, spacing1=3, spacing3=3)
-    txt_box.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
+    head = tk.Frame(dlg, bg=BG_PANEL_ALT, padx=_s(24), pady=_s(16))
+    head.pack(fill=tk.X)
+    tk.Label(head, text="SPECIFICATION", font=(MONO, 8, "bold"),
+             fg=ACCENT_HOVER, bg=BG_PANEL_ALT).pack(anchor="w")
+    tk.Label(head, text=tr("guide_dlg_heading"), font=(FONT, 14, "bold"),
+             fg=TEXT_PRI, bg=BG_PANEL_ALT).pack(anchor="w", pady=(_s(2), _s(2)))
+    tk.Label(head, text=tr("guide_dlg_subheading"), font=(FONT, 9),
+             fg=TEXT_SEC, bg=BG_PANEL_ALT).pack(anchor="w")
+    tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X)
+
+    body = tk.Frame(dlg, bg=BG_RAIL, padx=_s(24), pady=_s(16))
+    body.pack(fill=tk.BOTH, expand=True)
+
+    # 先固定底部按钮区，确保在任意弹窗高度下永不裁切
+    foot = tk.Frame(body, bg=BG_RAIL)
+    foot.pack(side=tk.BOTTOM, fill=tk.X, pady=(_s(12), 0))
+
+    txt_wrap = tk.Frame(body, bg=BG_CONSOLE, highlightbackground=BORDER, highlightthickness=1)
+    txt_wrap.pack(fill=tk.BOTH, expand=True)
+    txt_box = tk.Text(txt_wrap, bg=BG_CONSOLE, fg="#CBD5E1", font=(FONT, 10),
+                      height=1, relief=tk.FLAT, wrap=tk.WORD, padx=_s(16), pady=_s(14),
+                      spacing1=_s(3), spacing3=_s(3), selectbackground=ACCENT_DIM,
+                      selectforeground=TEXT_PRI)
+    scroll = ttk.Scrollbar(txt_wrap, orient=tk.VERTICAL, command=txt_box.yview,
+                           style="Studio.Vertical.TScrollbar")
+    txt_box.configure(yscrollcommand=scroll.set)
+    scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    txt_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
     sample_text = I18N.get_guide_text()
     txt_box.insert(tk.END, sample_text)
     txt_box.configure(state=tk.DISABLED)
-    row = tk.Frame(pad, bg=PANEL)
-    row.pack(fill=tk.X)
 
     def _copy_sample():
         parent.clipboard_clear()
         parent.clipboard_append(sample_text)
-        cp_btn.config(text=tr("guide_btn_copied"), fg=MINT)
-        parent.after(1800, lambda: cp_btn.config(text=tr("guide_btn_copy"), fg=TEXT))
+        cp_btn.configure(text=tr("guide_btn_copied"), fg=EMERALD)
+        dlg.after(1800, lambda: cp_btn.configure(text=tr("guide_btn_copy"), fg=TEXT_PRI))
 
-    cp_btn = tk.Button(row, text=tr("guide_btn_copy"), font=(FONT, 9), fg=TEXT, bg=SURFACE,
-                       activebackground=SURFACE_HOVER, activeforeground=TEXT,
-                       relief=tk.FLAT, padx=16, pady=8, cursor="hand2", command=_copy_sample)
+    cp_btn = tk.Button(foot, text=tr("guide_btn_copy"), font=(FONT, 9),
+                       fg=TEXT_PRI, bg=BG_SLOT, activebackground=BG_SLOT_HOVER,
+                       activeforeground=TEXT_PRI, relief=tk.FLAT, bd=0,
+                       padx=_s(16), pady=_s(8), cursor="hand2", command=_copy_sample)
     cp_btn.pack(side=tk.LEFT)
-    tk.Button(row, text=tr("guide_btn_done"), font=(FONT, 9, "bold"), fg=INK, bg=PINK,
-              activebackground=PINK_HOVER, activeforeground=INK, relief=tk.FLAT,
-              padx=22, pady=8, cursor="hand2", command=dlg.destroy).pack(side=tk.RIGHT)
+    tk.Button(foot, text=tr("guide_btn_done"), font=(FONT, 9, "bold"),
+              fg=INK_DARK, bg=ACCENT, activebackground=ACCENT_HOVER,
+              activeforeground=INK_DARK, relief=tk.FLAT, bd=0,
+              padx=_s(22), pady=_s(8), cursor="hand2", command=dlg.destroy).pack(side=tk.RIGHT)
 
+
+# ══════════════════════════════════════════════════════════════════════════
+#  主工作台构建入口
+# ══════════════════════════════════════════════════════════════════════════
 
 def build_ui(ctx):
-    """创建完整工作台。ctx 提供业务回调与运行环境信息。"""
+    """创建 FA-ASMR 专业音频控制台前端。ctx 提供业务回调与运行环境信息。"""
+    enable_windows_dpi_awareness()
     root = ctx.root
+    _init_dpi_scaling(root)
+
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    init_w = min(_s(1240), int(sw * 0.92))
+    init_h = min(_s(820), int(sh * 0.88))
+    min_w = min(_s(980), int(sw * 0.85))
+    min_h = min(_s(640), int(sh * 0.80))
+
     root.title(tr("app_title"))
-    root.geometry("1180x840")
-    root.minsize(940, 660)
-    root.configure(bg=BG)
-    if ctx.pil:
-        try:
-            from PIL import Image, ImageTk
-            icon_path = os.path.join(ctx.script_dir, "assets", "mascot_icon.png")
-            root._icon_photo = ImageTk.PhotoImage(Image.open(icon_path).convert("RGBA"))
-            root.wm_iconphoto(True, root._icon_photo)
-        except Exception:
-            pass
+    root.geometry(f"{init_w}x{init_h}")
+    root.minsize(min_w, min_h)
+    root.configure(bg=BG_APP)
+    _build_studio_icon(root, bool(ctx.pil))
 
-    def _label(parent, text, size=9, color=TEXT, bold=False, **kwargs):
-        return tk.Label(parent, text=text, font=(FONT, size, "bold" if bold else "normal"),
-                        fg=color, bg=parent.cget("bg"), **kwargs)
-
-    def _frame(parent, color=PANEL, border=False, **kwargs):
-        return tk.Frame(parent, bg=color, highlightbackground=BORDER if border else color,
-                        highlightthickness=1 if border else 0, **kwargs)
-
-    def _button(parent, text, command, primary=False, compact=False):
-        btn = tk.Button(parent, text=text, command=command,
-                        font=(FONT, 9, "bold" if primary else "normal"),
-                        fg=INK if primary else TEXT,
-                        bg=PINK if primary else SURFACE,
-                        activebackground=PINK_HOVER if primary else SURFACE_HOVER,
-                        activeforeground=INK if primary else TEXT,
-                        disabledforeground=MUTED, relief=tk.FLAT, bd=0,
-                        padx=14 if compact else 18, pady=7 if compact else 10,
-                        cursor="hand2")
-        return btn
-
-    # 全局控件样式。
+    # 全局 ttk 暗色滚动条样式（按 DPI 缩放宽度）
     style = ttk.Style(root)
     style.theme_use("clam")
-    style.configure("TProgressbar", thickness=4, borderwidth=0,
-                    troughcolor=SURFACE, background=PINK)
-    style.configure("TScrollbar", background=SURFACE, troughcolor=PANEL,
-                    borderwidth=0, arrowsize=10, relief=tk.FLAT)
-    style.map("TScrollbar", background=[("active", SURFACE_ACTIVE), ("pressed", PINK)])
-    style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE,
-                    foreground=TEXT, arrowcolor=MUTED, borderwidth=0,
-                    relief=tk.FLAT, padding=6)
-    style.map("TCombobox", fieldbackground=[("readonly", SURFACE)],
-              selectbackground=[("readonly", SURFACE)], selectforeground=[("readonly", TEXT)],
-              foreground=[("readonly", TEXT), ("disabled", MUTED)])
-    root.option_add("*TCombobox*Listbox.background", SURFACE)
-    root.option_add("*TCombobox*Listbox.foreground", TEXT)
-    root.option_add("*TCombobox*Listbox.selectBackground", PINK_DARK)
-    root.option_add("*TCombobox*Listbox.selectForeground", PINK)
-    root.option_add("*TCombobox*Listbox.relief", "flat")
-    root.option_add("*TCombobox*Listbox.borderWidth", "0")
+    style.configure("Studio.Vertical.TScrollbar",
+                    background="#242E42", troughcolor=BG_STAGE,
+                    borderwidth=0, arrowsize=0, width=_s(8), relief=tk.FLAT)
+    style.map("Studio.Vertical.TScrollbar",
+              background=[("active", "#334155"), ("pressed", ACCENT)])
 
-    # 后台工作线程队列调度
-    ui_events = queue.Queue()
+    # 线程安全 UI 调度队列
+    ui_events: queue.Queue = queue.Queue()
     closing = False
 
     def _post_ui(callback):
@@ -190,77 +784,21 @@ def build_ui(ctx):
     def _drain_ui_events():
         while True:
             try:
-                callback = ui_events.get_nowait()
+                cb = ui_events.get_nowait()
             except queue.Empty:
                 break
             try:
-                callback()
+                cb()
             except tk.TclError:
                 if not closing:
                     raise
         if not closing:
             root.after(30, _drain_ui_events)
+
     root.after(30, _drain_ui_events)
 
-    main = tk.Frame(root, bg=BG)
-    main.pack(fill=tk.BOTH, expand=True, padx=24, pady=18)
-
-    # 顶部夜樱横幅
-    hero = _frame(main, "#1a1820", border=True, height=142)
-    hero.pack(fill=tk.X, pady=(0, 18))
-    hero.pack_propagate(False)
-    hero_canvas = tk.Canvas(hero, bg="#f5e9ee", bd=0, highlightthickness=0)
-    hero_canvas.pack(fill=tk.BOTH, expand=True)
-    hero_image_id = hero_canvas.create_image(0, 0, anchor="nw")
-    hero_left_id = hero_canvas.create_text(30, 34, anchor="nw", fill="#984467",
-                                           text=tr("banner_badge"),
-                                           font=(FONT, 8, "bold"))
-    hero_title_id = hero_canvas.create_text(28, 57, anchor="nw", fill="#362831",
-                                            text=tr("banner_title"),
-                                            font=(FONT, 20, "bold"))
-    hero_sub_id = hero_canvas.create_text(30, 103, anchor="nw", fill="#66535e",
-                                          text=tr("banner_subtitle"),
-                                          font=(FONT, 9))
-    hero_device_id = hero_canvas.create_text(0, 24, anchor="ne",
-                                             fill="#325e4e" if ctx.cuda_ok else "#66535e",
-                                             text=tr("device_cuda") if ctx.cuda_ok else tr("device_cpu"),
-                                             font=(FONT, 9, "bold"))
-    root._hero_photo = None
-
-    def _draw_hero(event=None):
-        width = max(hero.winfo_width(), 400)
-        height = max(hero.winfo_height(), 140)
-        hero_canvas.coords(hero_device_id, width - 24, 24)
-        if ctx.pil:
-            try:
-                from PIL import Image, ImageEnhance, ImageTk
-                path = os.path.join(ctx.script_dir, "assets", "asmr_banner.jpg")
-                im = Image.open(path).convert("RGB")
-                scale = max(width / im.width, height / im.height)
-                resized = im.resize((int(im.width * scale) + 1, int(im.height * scale) + 1))
-                left = max(0, (resized.width - width) // 2)
-                top = max(0, int((resized.height - height) * 0.28))
-                im = resized.crop((left, top, left + width, top + height))
-                im = ImageEnhance.Brightness(im).enhance(1.10)
-                wash = Image.new("RGB", im.size, "#fff8fa")
-                im = Image.blend(im, wash, 0.28).convert("RGBA")
-                mask = Image.new("L", im.size)
-                pixels = mask.load()
-                fade_end = int(width * 0.76)
-                for x in range(width):
-                    alpha = 242 if x < width * 0.48 else int(242 * max(0, (fade_end - x) / (fade_end - width * 0.48)))
-                    for y in range(height):
-                        pixels[x, y] = alpha
-                veil = Image.new("RGBA", im.size, "#fff8fa")
-                im = Image.composite(veil, im, mask).convert("RGB")
-                root._hero_photo = ImageTk.PhotoImage(im)
-                hero_canvas.itemconfigure(hero_image_id, image=root._hero_photo)
-            except Exception:
-                pass
-    hero_canvas.bind("<Configure>", _draw_hero)
-
+    # ── 状态变量与设置持久化（与旧版 JSON 结构 100% 兼容） ──────────
     lang_var = tk.StringVar(value=I18N.current_lang)
-    lang_display_var = tk.StringVar(value=LANG_MAP.get(I18N.current_lang, "简体中文"))
     mode_var = tk.StringVar(value="single")
     dev_var = tk.StringVar(value="cuda" if ctx.cuda_ok else "cpu")
     end_extend_var = tk.StringVar(value="0.8")
@@ -280,189 +818,567 @@ def build_ui(ctx):
 
     def _save_settings():
         try:
-            current = mode_var.get()
-            multi_order_var.set(current in ("multi_speaker", "multi_persp"))
-            multi_persp_var.set(current == "multi_persp")
-            import json
-            with open(ctx.settings_file, "w", encoding="utf-8") as file:
-                json.dump({key: var.get() for var, key, _ in _var_meta}, file,
-                          ensure_ascii=False, indent=2)
+            cur = mode_var.get()
+            multi_order_var.set(cur in ("multi_speaker", "multi_persp"))
+            multi_persp_var.set(cur == "multi_persp")
+            with open(ctx.settings_file, "w", encoding="utf-8") as f:
+                json.dump({k: v.get() for v, k, _ in _var_meta}, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
     def _load_settings():
         if not os.path.isfile(ctx.settings_file):
-            initial_lang = detect_system_lang()
-            I18N.set_lang(initial_lang)
-            lang_var.set(initial_lang)
-            lang_display_var.set(LANG_MAP.get(initial_lang, "简体中文"))
+            init_lang = detect_system_lang()
+            I18N.set_lang(init_lang)
+            lang_var.set(init_lang)
             return
         try:
-            import json
-            with open(ctx.settings_file, "r", encoding="utf-8") as file:
-                data = json.load(file)
-            for var, key, convert in _var_meta:
+            with open(ctx.settings_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for var, key, conv in _var_meta:
                 if key in data:
-                    var.set(convert(data[key]))
+                    var.set(conv(data[key]))
             if not ctx.cuda_ok:
                 dev_var.set("cpu")
-            if "lang" in data and data["lang"] in LANG_MAP:
-                cur_lang = data["lang"]
-            else:
-                cur_lang = detect_system_lang()
+            cur_lang = data["lang"] if data.get("lang") in LANG_MAP else detect_system_lang()
             I18N.set_lang(cur_lang)
             lang_var.set(cur_lang)
-            lang_display_var.set(LANG_MAP.get(cur_lang, "简体中文"))
-
             if "align_mode" not in data:
                 mode_var.set("multi_persp" if data.get("multi_persp") else
                              "multi_speaker" if data.get("multi_order") else "single")
         except Exception:
             pass
+
     _load_settings()
 
-    # 三模式选择栏
-    mode_bar = _frame(main, BG)
-    mode_bar.pack(fill=tk.X, pady=(0, 10))
-    mode_title_lbl = _label(mode_bar, tr("mode_title_label"), 10, TEXT, True)
-    mode_title_lbl.pack(anchor="w", pady=(0, 8))
-    mode_row = _frame(mode_bar, BG)
-    mode_row.pack(fill=tk.X)
-    mode_buttons = {}
+    # ══════════════════════════════════════════════════════════════════════
+    #  主双栏容器：Left Control Rail (284px) | Center Studio Stage (Flex)
+    # ══════════════════════════════════════════════════════════════════════
+    rail_w = _s(284)
+    stage_min_w = max(_s(480), min_w - rail_w - 2)
+    shell = tk.Frame(root, bg=BG_APP)
+    shell.pack(fill=tk.BOTH, expand=True)
+    shell.grid_columnconfigure(0, weight=0, minsize=rail_w)
+    shell.grid_columnconfigure(1, weight=0, minsize=1)
+    shell.grid_columnconfigure(2, weight=1, minsize=stage_min_w)
+    shell.grid_rowconfigure(0, weight=1)
 
-    def _on_mode_change():
-        current = mode_var.get()
-        for key, button in mode_buttons.items():
-            selected = key == current
-            button.configure(bg=PINK_DARK if selected else PANEL,
-                             fg=PINK if selected else MUTED,
-                             activebackground=PINK_DARK if selected else SURFACE,
-                             activeforeground=PINK if selected else TEXT)
-        mode_desc_var.set(tr(f"mode_{current}_desc"))
-        _update_drop_zone_text()
-        _render_all_cards()
+    rail = tk.Frame(shell, bg=BG_RAIL, width=rail_w)
+    rail.grid(row=0, column=0, sticky="nsew")
+    rail.pack_propagate(False)
+
+    tk.Frame(shell, bg=BORDER, width=1).grid(row=0, column=1, sticky="ns")
+
+    stage = tk.Frame(shell, bg=BG_STAGE)
+    stage.grid(row=0, column=2, sticky="nsew")
+
+    # ── 1. 左侧控制导轨（顶：示波器 | 底：固定系统区 | 中：自适应可滚参数区）──
+    scope_header = OscilloscopeHeader(rail, cuda_ok=bool(ctx.cuda_ok))
+    scope_header.pack(side=tk.TOP, fill=tk.X)
+
+    # 1.3 底部系统区（优先 pack(BOTTOM)，确保任意窗口高度下语言切换与指南永不裁切）
+    rail_footer = tk.Frame(rail, bg=BG_RAIL, padx=_s(14), pady=_s(10))
+    rail_footer.pack(side=tk.BOTTOM, fill=tk.X)
+    tk.Frame(rail_footer, bg=BORDER, height=1).pack(fill=tk.X, pady=(0, _s(8)))
+    sec_sys_lbl = tk.Label(rail_footer, text=_etr("rail_section_sys"),
+                           font=(FONT, 8, "bold"), fg=TEXT_MUTED, bg=BG_RAIL)
+    sec_sys_lbl.pack(anchor="w", pady=(0, _s(5)))
+
+    def _on_lang_select(code: str):
+        I18N.set_lang(code)
+        lang_var.set(code)
+        _refresh_all_i18n()
         _save_settings()
 
-    for index, key in enumerate(("single", "multi_speaker", "multi_persp")):
-        btn = tk.Button(mode_row, text=f"0{index + 1}   {tr(f'mode_{key}_title')}", anchor="w",
-                        font=(FONT, 10, "bold"), relief=tk.FLAT, bd=0,
-                        padx=18, pady=13, cursor="hand2",
-                        command=lambda k=key: (mode_var.set(k), _on_mode_change()))
-        btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0 if index == 0 else 2, 0))
-        mode_buttons[key] = btn
+    lang_seg = SegmentedControl(
+        rail_footer,
+        options=[("zh", "中文"), ("ja", "日本語"), ("en", "EN")],
+        value=lang_var.get(),
+        on_change=_on_lang_select,
+    )
+    lang_seg.pack(fill=tk.X, pady=(0, _s(6)))
 
+    help_btn = tk.Button(rail_footer, text=f"?  {tr('btn_show_guide')}", font=(FONT, 8, "bold"),
+                         fg=TEXT_SEC, bg=BG_PANEL, activebackground=BG_SLOT_HOVER,
+                         activeforeground=TEXT_PRI, relief=tk.FLAT, bd=0,
+                         highlightbackground=BORDER, highlightthickness=1,
+                         pady=_s(6), cursor="hand2", command=lambda: show_script_help_dialog(root))
+    help_btn.pack(fill=tk.X)
+
+    # 中部参数导轨：默认高度无需滚动，缩至最小尺寸时自动允许滚轮滚动
+    rail_scroll_cv = tk.Canvas(rail, bg=BG_RAIL, bd=0, highlightthickness=0)
+    rail_scroll_cv.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    rail_body = tk.Frame(rail_scroll_cv, bg=BG_RAIL, padx=_s(14), pady=_s(10))
+    rail_win_id = rail_scroll_cv.create_window((0, 0), window=rail_body, anchor="nw")
+
+    def _sync_rail_scroll(_e=None):
+        rail_scroll_cv.configure(scrollregion=rail_scroll_cv.bbox("all"))
+
+    rail_scroll_cv.bind("<Configure>", lambda e: rail_scroll_cv.itemconfig(rail_win_id, width=e.width))
+    rail_body.bind("<Configure>", _sync_rail_scroll)
+
+    def _on_rail_wheel(event):
+        if rail_body.winfo_reqheight() > rail_scroll_cv.winfo_height():
+            rail_scroll_cv.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    rail_scroll_cv.bind("<Enter>", lambda _e: root.bind_all("<MouseWheel>", _on_rail_wheel))
+    rail_scroll_cv.bind("<Leave>", lambda _e: root.unbind_all("<MouseWheel>"))
+
+    # 1.1 引擎模式选择组
+    sec_engine_lbl = tk.Label(rail_body, text=_etr("rail_section_engine"),
+                              font=(FONT, 8, "bold"), fg=TEXT_MUTED, bg=BG_RAIL)
+    sec_engine_lbl.pack(anchor="w", pady=(0, _s(6)))
+
+    mode_tiles: dict[str, dict] = {}
+    _MODE_CODES = {"single": "SEQ", "multi_speaker": "SPK", "multi_persp": "POV"}
+    _MODE_ACCENTS = {"single": ACCENT_HOVER, "multi_speaker": ACCENT_HOVER, "multi_persp": AMBER}
+    _MODE_DIMS = {"single": ACCENT_DIM, "multi_speaker": ACCENT_DIM, "multi_persp": AMBER_DIM}
+
+    def _select_mode(key: str):
+        if ctx.is_running():
+            return
+        mode_var.set(key)
+        _on_mode_change()
+
+    for m_key in ("single", "multi_speaker", "multi_persp"):
+        tile = tk.Frame(rail_body, bg=BG_PANEL, highlightbackground=BORDER_SUBTLE,
+                        highlightthickness=1, cursor="hand2")
+        tile.pack(fill=tk.X, pady=(0, _s(5)))
+
+        bar = tk.Frame(tile, bg=BORDER, width=_s(3))
+        bar.pack(side=tk.LEFT, fill=tk.Y)
+
+        inner = tk.Frame(tile, bg=BG_PANEL, padx=_s(9), pady=_s(6))
+        inner.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        row_top = tk.Frame(inner, bg=BG_PANEL)
+        row_top.pack(fill=tk.X)
+
+        tag_lbl = tk.Label(row_top, text=_MODE_CODES[m_key], font=(MONO, 7, "bold"),
+                           fg=TEXT_MUTED, bg=BG_SLOT, padx=_s(5), pady=_s(1))
+        tag_lbl.pack(side=tk.RIGHT)
+
+        title_lbl = tk.Label(row_top, text=tr(f"mode_{m_key}_title"),
+                             font=(FONT, 9, "bold"), fg=TEXT_PRI, bg=BG_PANEL)
+        title_lbl.pack(side=tk.LEFT)
+
+        sub_lbl = tk.Label(inner, text=tr(f"mode_{m_key}_sub"), font=(FONT, 8),
+                           fg=TEXT_MUTED, bg=BG_PANEL, anchor="w", justify=tk.LEFT, wraplength=_s(216))
+        sub_lbl.pack(fill=tk.X, pady=(_s(2), 0))
+
+        mode_tiles[m_key] = {
+            "tile": tile, "bar": bar, "inner": inner,
+            "row_top": row_top, "tag": tag_lbl, "title": title_lbl, "sub": sub_lbl,
+        }
+
+        def _bind_tile(w, k=m_key):
+            w.bind("<Button-1>", lambda _e: _select_mode(k))
+            w.bind("<Enter>", lambda _e: _paint_mode_tiles(hover_key=k))
+            w.bind("<Leave>", lambda _e: _paint_mode_tiles())
+
+        for w in (tile, bar, inner, row_top, tag_lbl, title_lbl, sub_lbl):
+            _bind_tile(w)
+
+    # 模式说明微面板
+    mode_desc_box = tk.Frame(rail_body, bg=BG_APP, highlightbackground=BORDER_SUBTLE,
+                             highlightthickness=1, padx=_s(9), pady=_s(6))
+    mode_desc_box.pack(fill=tk.X, pady=(_s(1), _s(10)))
     mode_desc_var = tk.StringVar(value=tr(f"mode_{mode_var.get()}_desc"))
-    tk.Label(mode_bar, textvariable=mode_desc_var, font=(FONT, 8), fg=MUTED,
-             bg=BG, anchor="w").pack(fill=tk.X, pady=(8, 0))
+    mode_desc_lbl = tk.Label(mode_desc_box, textvariable=mode_desc_var, font=(FONT, 8),
+                             fg=TEXT_SEC, bg=BG_APP, anchor="w", justify=tk.LEFT, wraplength=_s(230))
+    mode_desc_lbl.pack(fill=tk.X)
 
-    # 工作区分栏
-    workspace = _frame(main, BG)
-    workspace.pack(fill=tk.BOTH, expand=True)
-    workspace.grid_columnconfigure(0, weight=1, minsize=520)
-    workspace.grid_columnconfigure(1, weight=0, minsize=292)
-    workspace.grid_rowconfigure(0, weight=1)
-    left = _frame(workspace, BG)
-    left.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
-    right = _frame(workspace, BG)
-    right.grid(row=0, column=1, sticky="nsew")
+    def _paint_mode_tiles(hover_key: str | None = None):
+        cur = mode_var.get()
+        for k, refs in mode_tiles.items():
+            sel = k == cur
+            hov = (k == hover_key) and not sel
+            ac = _MODE_ACCENTS[k]
+            dim = _MODE_DIMS[k]
+            bg_c = "#17202D" if sel else (BG_SLOT if hov else BG_PANEL)
+            refs["tile"].configure(bg=bg_c, highlightbackground=ac if sel else (BORDER_STRONG if hov else BORDER_SUBTLE))
+            refs["bar"].configure(bg=ac if sel else (BORDER_STRONG if hov else BORDER_SUBTLE))
+            refs["inner"].configure(bg=bg_c)
+            refs["row_top"].configure(bg=bg_c)
+            refs["title"].configure(bg=bg_c, fg=TEXT_PRI if (sel or hov) else TEXT_SEC)
+            refs["sub"].configure(bg=bg_c, fg=TEXT_SEC if sel else TEXT_MUTED)
+            refs["tag"].configure(bg=dim if sel else BG_SLOT, fg=ac if sel else TEXT_MUTED)
 
-    # 1. 顶部导入框
-    drop_frame = _frame(left, PANEL, border=True, height=105)
-    drop_frame.pack(fill=tk.X, pady=(0, 10))
-    drop_frame.pack_propagate(False)
-    drop_inner = _frame(drop_frame, PANEL)
-    drop_inner.place(relx=0.015, rely=0.06, relwidth=0.97, relheight=0.88)
-    drop_icon = _label(drop_inner, "＋", 22, PINK)
-    drop_icon.pack(pady=(2, 0))
-    drop_text_var = tk.StringVar()
-    drop_label = tk.Label(drop_inner, textvariable=drop_text_var, font=(FONT, 9),
-                          fg=TEXT, bg=PANEL, cursor="hand2", justify=tk.CENTER)
-    drop_label.pack()
-    drop_hint_lbl = _label(drop_inner, tr("drop_hint"), 8, MUTED)
-    drop_hint_lbl.pack(pady=(2, 0))
+    # 1.2 运行参数区
+    tk.Frame(rail_body, bg=BORDER, height=1).pack(fill=tk.X, pady=(0, _s(8)))
+    sec_params_lbl = tk.Label(rail_body, text=_etr("rail_section_params"),
+                              font=(FONT, 8, "bold"), fg=TEXT_MUTED, bg=BG_RAIL)
+    sec_params_lbl.pack(anchor="w", pady=(0, _s(7)))
 
-    def _update_drop_zone_text():
-        if mode_var.get() == "multi_persp":
-            drop_text_var.set(tr("drop_prompt_persp"))
-        else:
-            drop_text_var.set(tr("drop_prompt_normal"))
+    # 驻留延长（步进器 + 快捷预设）
+    ext_head = tk.Frame(rail_body, bg=BG_RAIL)
+    ext_head.pack(fill=tk.X, pady=(0, _s(4)))
+    ext_title_lbl = tk.Label(ext_head, text=tr("label_end_extend"), font=(FONT, 8),
+                             fg=TEXT_SEC, bg=BG_RAIL)
+    ext_title_lbl.pack(side=tk.LEFT)
+    ext_unit_lbl = tk.Label(ext_head, text=tr("label_sec"), font=(FONT, 8),
+                            fg=TEXT_MUTED, bg=BG_RAIL)
+    ext_unit_lbl.pack(side=tk.RIGHT)
 
-    def _drop_hover(active=False):
-        color = SURFACE if active else PANEL
-        drop_frame.configure(bg=color, highlightbackground=PINK if active else BORDER)
-        for widget in (drop_inner, drop_icon, drop_label):
-            widget.configure(bg=color)
-        for child in drop_inner.winfo_children():
-            child.configure(bg=color)
-    drop_frame.bind("<Enter>", lambda e: _drop_hover(True))
-    drop_frame.bind("<Leave>", lambda e: _drop_hover(False))
-    _update_drop_zone_text()
+    ext_ctrl = tk.Frame(rail_body, bg=BG_APP, highlightbackground=BORDER, highlightthickness=1)
+    ext_ctrl.pack(fill=tk.X, pady=(0, _s(5)))
 
-    # 2. 队列操作顶栏
-    queue_head = _frame(left, BG)
-    queue_head.pack(fill=tk.X, pady=(2, 6))
-    queue_title_lbl = _label(queue_head, tr("queue_title"), 10, TEXT, True)
-    queue_title_lbl.pack(side=tk.LEFT)
-    queue_meta_var = tk.StringVar(value=tr("queue_empty_meta"))
-    tk.Label(queue_head, textvariable=queue_meta_var, font=(FONT, 8), fg=MUTED,
-             bg=BG).pack(side=tk.LEFT, padx=8)
+    def _step_extend(delta: float):
+        if ctx.is_running():
+            return
+        try:
+            v = float(end_extend_var.get() or 0)
+        except ValueError:
+            v = 0.0
+        v = max(0.0, round(v + delta, 1))
+        end_extend_var.set(f"{v:.1f}")
+        _refresh_preset_chips()
+        _save_settings()
 
-    clear_btn = _button(queue_head, tr("btn_clear"), lambda: None, compact=True)
+    btn_ext_minus = tk.Button(ext_ctrl, text="−", font=(MONO, 10, "bold"), fg=TEXT_SEC,
+                              bg=BG_SLOT, activebackground=BG_SLOT_HOVER, activeforeground=TEXT_PRI,
+                              relief=tk.FLAT, bd=0, width=3, cursor="hand2",
+                              command=lambda: _step_extend(-0.1))
+    btn_ext_minus.pack(side=tk.LEFT, fill=tk.Y)
+
+    ext_entry = tk.Entry(ext_ctrl, textvariable=end_extend_var, font=(MONO, 10, "bold"),
+                         bg=BG_APP, fg=ACCENT_HOVER, insertbackground=ACCENT_HOVER,
+                         relief=tk.FLAT, bd=0, justify="center")
+    ext_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, ipady=_s(4))
+    ext_entry.bind("<FocusOut>", lambda _e: (_refresh_preset_chips(), _save_settings()))
+    ext_entry.bind("<Return>", lambda _e: (_refresh_preset_chips(), _save_settings()))
+
+    btn_ext_plus = tk.Button(ext_ctrl, text="＋", font=(MONO, 10, "bold"), fg=TEXT_SEC,
+                             bg=BG_SLOT, activebackground=BG_SLOT_HOVER, activeforeground=TEXT_PRI,
+                             relief=tk.FLAT, bd=0, width=3, cursor="hand2",
+                             command=lambda: _step_extend(0.1))
+    btn_ext_plus.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # 快捷预设芯片
+    preset_row = tk.Frame(rail_body, bg=BG_RAIL)
+    preset_row.pack(fill=tk.X, pady=(0, _s(10)))
+    preset_btns: dict[str, tk.Label] = {}
+
+    def _set_preset(val_s: str):
+        if ctx.is_running():
+            return
+        end_extend_var.set(val_s)
+        _refresh_preset_chips()
+        _save_settings()
+
+    def _refresh_preset_chips():
+        try:
+            cur_v = f"{float(end_extend_var.get()):.1f}"
+        except ValueError:
+            cur_v = ""
+        for val_s, lbl in preset_btns.items():
+            active = val_s == cur_v
+            lbl.configure(bg=ACCENT_DIM if active else BG_PANEL,
+                          fg=ACCENT_HOVER if active else TEXT_MUTED,
+                          highlightbackground=ACCENT if active else BORDER_SUBTLE)
+
+    for idx, pv in enumerate(("0.0", "0.5", "0.8", "1.5")):
+        chip = tk.Label(preset_row, text=f"{pv}s", font=(MONO, 8), pady=_s(2),
+                        bg=BG_PANEL, fg=TEXT_MUTED, highlightbackground=BORDER_SUBTLE,
+                        highlightthickness=1, cursor="hand2")
+        chip.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0 if idx == 0 else _s(4), 0))
+        chip.bind("<Button-1>", lambda _e, v=pv: _set_preset(v))
+        preset_btns[pv] = chip
+    _refresh_preset_chips()
+
+    # Ono-Gate 自定义超采样滑块开关
+    ono_row = tk.Frame(rail_body, bg=BG_RAIL)
+    ono_row.pack(fill=tk.X, pady=(0, _s(10)))
+    ono_lbl = tk.Label(ono_row, text=tr("check_ono_gate"), font=(FONT, 8),
+                       fg=TEXT_PRI, bg=BG_RAIL, anchor="w", wraplength=_s(192), justify=tk.LEFT)
+    ono_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    ono_switch = ToggleSwitch(ono_row, ono_gate_var, command=_save_settings,
+                              bg=BG_RAIL, pil_ok=bool(ctx.pil))
+    ono_switch.pack(side=tk.RIGHT, padx=(_s(6), 0))
+
+    # 计算设备分段切换
+    dev_lbl = tk.Label(rail_body, text=tr("label_device"), font=(FONT, 8),
+                       fg=TEXT_SEC, bg=BG_RAIL)
+    dev_lbl.pack(anchor="w", pady=(0, _s(4)))
+    dev_seg = SegmentedControl(
+        rail_body,
+        options=[("cuda", "CUDA GPU"), ("cpu", "CPU")],
+        value=dev_var.get(),
+        on_change=lambda k: (dev_var.set(k), _save_settings()),
+    )
+    if not ctx.cuda_ok:
+        dev_seg.set_disabled_keys(["cuda"])
+    dev_seg.pack(fill=tk.X, pady=(0, _s(4)))
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  2. 中央工作台（顶栏 + 未配对暂存坞 + 轨道矩阵 + 终端抽屉 + 走带栏）
+    # ══════════════════════════════════════════════════════════════════════
+
+    # 2.1 顶部工具栏（右侧按钮优先 pack，窄屏永不裁切）
+    topbar = tk.Frame(stage, bg=BG_PANEL_ALT, height=_s(52), padx=_s(18))
+    topbar.pack(fill=tk.X)
+    topbar.pack_propagate(False)
+
+    tb_right = tk.Frame(topbar, bg=BG_PANEL_ALT)
+    tb_right.pack(side=tk.RIGHT, fill=tk.Y, pady=_s(10))
+
+    clear_btn = tk.Button(tb_right, text=tr("btn_clear"), font=(FONT, 9),
+                          fg=TEXT_SEC, bg=BG_SLOT, activebackground=BG_SLOT_HOVER,
+                          activeforeground=TEXT_PRI, relief=tk.FLAT, bd=0,
+                          padx=_s(12), pady=_s(4), cursor="hand2")
     clear_btn.pack(side=tk.RIGHT)
-    add_btn = _button(queue_head, "＋ 添加文件", lambda: None, compact=True)
-    add_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
-    # 3. 未配对文件托盘（有落单素材时自动展示）
-    tray_frame = _frame(left, "#faf6f7", border=True)
-    tray_head = _frame(tray_frame, "#faf6f7")
-    tray_head.pack(fill=tk.X, padx=12, pady=(8, 4))
-    tray_title_lbl = _label(tray_head, tr("unpaired_tray_title"), 8, LAVENDER, bold=True)
-    tray_title_lbl.pack(side=tk.LEFT)
-    tray_hint_lbl = _label(tray_head, tr("unpaired_tray_hint"), 7, MUTED)
-    tray_hint_lbl.pack(side=tk.LEFT, padx=10)
-    tray_assemble_btn = _button(tray_head, "⚡ 智能组装为新任务", lambda: _auto_assemble_from_tray(), compact=True)
-    tray_assemble_btn.pack(side=tk.RIGHT)
-    tray_items_container = _frame(tray_frame, "#faf6f7")
-    tray_items_container.pack(fill=tk.X, padx=12, pady=(0, 8))
+    add_btn = tk.Button(tb_right, text=_etr("import_files"), font=(FONT, 9, "bold"),
+                        fg=ACCENT_HOVER, bg=ACCENT_DIM, activebackground="#163E58",
+                        activeforeground=TEXT_PRI, relief=tk.FLAT, bd=0,
+                        highlightbackground="#1E4B68", highlightthickness=1,
+                        padx=_s(14), pady=_s(4), cursor="hand2")
+    add_btn.pack(side=tk.RIGHT, padx=(0, _s(8)))
 
-    # 4. 可视化任务卡片流（支持内部拖拽互换/调配）
-    cards_wrapper = _frame(left, PANEL, border=True)
-    cards_wrapper.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+    dnd_hint_lbl = tk.Label(tb_right, text=_etr("dnd_hint"), font=(FONT, 8),
+                            fg=TEXT_MUTED, bg=BG_PANEL_ALT)
+    dnd_hint_lbl.pack(side=tk.RIGHT, padx=(0, _s(14)))
 
-    canvas = tk.Canvas(cards_wrapper, bg=PANEL, bd=0, highlightthickness=0)
-    cards_scrollbar = ttk.Scrollbar(cards_wrapper, orient=tk.VERTICAL, command=canvas.yview)
-    canvas.configure(yscrollcommand=cards_scrollbar.set)
-    cards_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    def _on_topbar_resize(event):
+        if event.width < _s(760):
+            if dnd_hint_lbl.winfo_manager():
+                dnd_hint_lbl.pack_forget()
+        else:
+            if not dnd_hint_lbl.winfo_manager():
+                dnd_hint_lbl.pack(side=tk.RIGHT, padx=(0, _s(14)))
 
-    cards_inner = tk.Frame(canvas, bg=PANEL)
-    cards_window_id = canvas.create_window((0, 0), window=cards_inner, anchor="nw")
+    topbar.bind("<Configure>", _on_topbar_resize)
 
-    def _on_canvas_configure(event):
-        canvas.itemconfig(cards_window_id, width=event.width)
-    canvas.bind("<Configure>", _on_canvas_configure)
+    tb_left = tk.Frame(topbar, bg=BG_PANEL_ALT)
+    tb_left.pack(side=tk.LEFT, fill=tk.Y)
+    queue_title_lbl = tk.Label(tb_left, text=tr("queue_title"), font=(FONT, 11, "bold"),
+                               fg=TEXT_PRI, bg=BG_PANEL_ALT)
+    queue_title_lbl.pack(side=tk.LEFT, pady=_s(12))
 
-    def _on_inner_configure(_event):
-        canvas.configure(scrollregion=canvas.bbox("all"))
-    cards_inner.bind("<Configure>", _on_inner_configure)
+    kpi_frame = tk.Frame(tb_left, bg=BG_PANEL_ALT)
+    kpi_frame.pack(side=tk.LEFT, padx=(_s(14), 0), pady=_s(12))
 
-    def _on_mousewheel(event):
-        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-    canvas.bind("<MouseWheel>", _on_mousewheel)
-    cards_inner.bind("<MouseWheel>", _on_mousewheel)
+    def _make_kpi_pill(color_fg, color_bg):
+        box = tk.Frame(kpi_frame, bg=color_bg, highlightbackground=BORDER,
+                       highlightthickness=1, padx=_s(8), pady=_s(2))
+        box.pack(side=tk.LEFT, padx=(0, _s(6)))
+        k_lbl = tk.Label(box, text="", font=(FONT, 8), fg=TEXT_MUTED, bg=color_bg)
+        k_lbl.pack(side=tk.LEFT, padx=(0, _s(5)))
+        v_lbl = tk.Label(box, text="00", font=(MONO, 9, "bold"), fg=color_fg, bg=color_bg)
+        v_lbl.pack(side=tk.LEFT)
+        return k_lbl, v_lbl
 
-    # 状态数据结构
-    _task_store = {}      # cid -> dict
-    _unpaired_pool = {}    # uid -> dict
+    kpi_total_k, kpi_total_v = _make_kpi_pill(TEXT_PRI, BG_APP)
+    kpi_ready_k, kpi_ready_v = _make_kpi_pill(ACCENT_HOVER, ACCENT_DIM)
+    kpi_done_k, kpi_done_v = _make_kpi_pill(EMERALD, EMERALD_DIM)
+
+    tk.Frame(stage, bg=BORDER, height=1).pack(fill=tk.X)
+
+    # 2.2 未配对素材暂存坞（仅在有落单文件时显示）
+    dock_frame = tk.Frame(stage, bg="#151311", highlightbackground="#423117", highlightthickness=1)
+    dock_accent = tk.Frame(dock_frame, bg=AMBER, width=_s(3))
+    dock_accent.pack(side=tk.LEFT, fill=tk.Y)
+    dock_content = tk.Frame(dock_frame, bg="#151311", padx=_s(14), pady=_s(8))
+    dock_content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    dock_top = tk.Frame(dock_content, bg="#151311")
+    dock_top.pack(fill=tk.X, pady=(0, _s(6)))
+    dock_title_lbl = tk.Label(dock_top, text=tr("unpaired_tray_title"),
+                              font=(FONT, 8, "bold"), fg=AMBER, bg="#151311")
+    dock_title_lbl.pack(side=tk.LEFT)
+    dock_hint_lbl = tk.Label(dock_top, text=tr("unpaired_tray_hint"),
+                             font=(FONT, 8), fg=TEXT_MUTED, bg="#151311")
+    dock_hint_lbl.pack(side=tk.LEFT, padx=_s(10))
+    dock_pair_btn = tk.Button(dock_top, text=_etr("auto_pair"), font=(FONT, 8, "bold"),
+                              fg=AMBER, bg=AMBER_DIM, activebackground="#3C2D14",
+                              activeforeground=AMBER_HOVER, relief=tk.FLAT, bd=0,
+                              padx=_s(10), pady=_s(2), cursor="hand2")
+    dock_pair_btn.pack(side=tk.RIGHT)
+
+    dock_items = tk.Frame(dock_content, bg="#151311")
+    dock_items.pack(fill=tk.X)
+
+    # 2.3 中央轨道矩阵主容器（列头 + 滚动视口）
+    matrix_outer = tk.Frame(stage, bg=BG_STAGE)
+    matrix_outer.pack(fill=tk.BOTH, expand=True)
+
+    col_header = tk.Frame(matrix_outer, bg=BG_PANEL_ALT, height=_s(30))
+    col_header.pack_propagate(False)
+    # 左侧对齐轨道状态灯条，右侧对齐滚动条槽，中间与每行 grid_body 完全同构
+    tk.Frame(col_header, bg=BG_PANEL_ALT, width=_s(3)).pack(side=tk.LEFT, fill=tk.Y)
+    tk.Frame(col_header, bg=BG_PANEL_ALT, width=_s(8)).pack(side=tk.RIGHT, fill=tk.Y)
+    col_header_grid = tk.Frame(col_header, bg=BG_PANEL_ALT, padx=_s(14))
+    col_header_grid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    col_header_sep = tk.Frame(matrix_outer, bg=BORDER, height=1)
+
+    matrix_scroll_wrap = tk.Frame(matrix_outer, bg=BG_STAGE)
+    matrix_scroll_wrap.pack(fill=tk.BOTH, expand=True)
+
+    matrix_canvas = tk.Canvas(matrix_scroll_wrap, bg=BG_STAGE, bd=0, highlightthickness=0)
+    matrix_sb = ttk.Scrollbar(matrix_scroll_wrap, orient=tk.VERTICAL,
+                              command=matrix_canvas.yview, style="Studio.Vertical.TScrollbar")
+    matrix_canvas.configure(yscrollcommand=matrix_sb.set)
+    matrix_sb.pack(side=tk.RIGHT, fill=tk.Y)
+    matrix_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    matrix_inner = tk.Frame(matrix_canvas, bg=BG_STAGE)
+    matrix_win_id = matrix_canvas.create_window((0, 0), window=matrix_inner, anchor="nw")
+
+    def _on_matrix_canvas_resize(event):
+        matrix_canvas.itemconfig(matrix_win_id, width=event.width)
+        if not _task_store:
+            matrix_canvas.itemconfig(matrix_win_id, height=max(event.height, _s(260)))
+
+    matrix_canvas.bind("<Configure>", _on_matrix_canvas_resize)
+    matrix_inner.bind("<Configure>", lambda _e: matrix_canvas.configure(scrollregion=matrix_canvas.bbox("all")))
+
+    # 智能作用域滚轮：指针进入轨道矩阵区域时接管滚动，离开时释放
+    def _on_matrix_wheel(event):
+        if _task_store:
+            matrix_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    matrix_scroll_wrap.bind("<Enter>", lambda _e: root.bind_all("<MouseWheel>", _on_matrix_wheel))
+    matrix_scroll_wrap.bind("<Leave>", lambda _e: root.unbind_all("<MouseWheel>"))
+
+    # ── 2.4 底部可折叠终端日志抽屉 ─────────────────────────────────────
+    console_drawer = tk.Frame(stage, bg=BG_CONSOLE, height=_s(170))
+    console_drawer.pack_propagate(False)
+    tk.Frame(console_drawer, bg=BORDER, height=1).pack(fill=tk.X)
+    console_bar = tk.Frame(console_drawer, bg="#0D1016", padx=_s(16), pady=_s(4))
+    console_bar.pack(fill=tk.X)
+    console_hdr_lbl = tk.Label(console_bar, text=_etr("console_header"),
+                               font=(FONT, 8, "bold"), fg=TEXT_MUTED, bg="#0D1016")
+    console_hdr_lbl.pack(side=tk.LEFT)
+    log_clear_btn = tk.Button(console_bar, text=tr("btn_clear_log"), font=(FONT, 8),
+                              fg=TEXT_MUTED, bg="#161C28", activebackground=BG_SLOT_HOVER,
+                              activeforeground=TEXT_PRI, relief=tk.FLAT, bd=0,
+                              padx=_s(8), pady=_s(2), cursor="hand2")
+    log_clear_btn.pack(side=tk.RIGHT)
+
+    log_body = tk.Frame(console_drawer, bg=BG_CONSOLE)
+    log_body.pack(fill=tk.BOTH, expand=True)
+    log_text = tk.Text(log_body, bg=BG_CONSOLE, fg="#94A3B8", font=(FONT, 9),
+                       relief=tk.FLAT, wrap=tk.WORD, padx=_s(16), pady=_s(8),
+                       spacing1=_s(1), spacing3=_s(1),
+                       insertbackground=ACCENT_HOVER, selectbackground=ACCENT_DIM)
+    log_scroll = ttk.Scrollbar(log_body, orient=tk.VERTICAL, command=log_text.yview,
+                               style="Studio.Vertical.TScrollbar")
+    log_text.configure(yscrollcommand=log_scroll.set)
+    log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    log_text.tag_configure("phase", foreground=ACCENT_HOVER)
+    log_text.tag_configure("ok", foreground=EMERALD)
+    log_text.tag_configure("warn", foreground=AMBER)
+    log_text.tag_configure("err", foreground=CRIMSON)
+
+    log_visible = tk.BooleanVar(value=False)
+
+    def _toggle_console():
+        if log_visible.get():
+            console_drawer.pack_forget()
+            log_visible.set(False)
+        else:
+            console_drawer.pack(fill=tk.X, before=transport_sep)
+            log_visible.set(True)
+        _refresh_console_btn()
+
+    def _refresh_console_btn():
+        active = log_visible.get()
+        sym = "▾" if active else "▸"
+        console_toggle_btn.configure(
+            text=f">_  {_etr('console_btn')} {sym}",
+            bg=ACCENT_DIM if active else BG_SLOT,
+            fg=ACCENT_HOVER if active else TEXT_SEC,
+        )
+
+    log_clear_btn.configure(command=lambda: log_text.delete("1.0", tk.END))
+
+    def append_log(msg: str):
+        def _insert():
+            line = msg + "\n"
+            tag = None
+            if any(k in msg for k in ("失败", "中断", "💔", "ERROR", "Error")):
+                tag = "err"
+            elif any(k in msg for k in ("⚠", "跳过", "警告")):
+                tag = "warn"
+            elif any(k in msg for k in ("完成", "✨", "💖", "🎯", "✓")):
+                tag = "ok"
+            elif msg.lstrip().startswith("["):
+                tag = "phase"
+            if tag:
+                log_text.insert(tk.END, line, tag)
+            else:
+                log_text.insert(tk.END, line)
+            log_text.see(tk.END)
+        _post_ui(_insert)
+
+    # ── 2.5 底部走带控制栏 (Studio Transport Deck) ───────────────────────
+    transport_sep = tk.Frame(stage, bg=BORDER, height=1)
+    transport_sep.pack(fill=tk.X)
+
+    transport = tk.Frame(stage, bg=BG_RAIL, height=_s(74), padx=_s(20), pady=_s(12))
+    transport.pack(fill=tk.X)
+    transport.pack_propagate(False)
+
+    # 右侧主走带按钮
+    start_btn = tk.Button(transport, text=tr("btn_start"), font=(FONT, 10, "bold"),
+                          fg=INK_DARK, bg=ACCENT, activebackground=ACCENT_HOVER,
+                          activeforeground=INK_DARK, disabledforeground=TEXT_MUTED,
+                          relief=tk.FLAT, bd=0, padx=_s(26), pady=_s(10), cursor="hand2")
+    start_btn.pack(side=tk.RIGHT, padx=(_s(18), 0))
+
+    # 左侧状态与进度条区域
+    trans_left = tk.Frame(transport, bg=BG_RAIL)
+    trans_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    trans_top = tk.Frame(trans_left, bg=BG_RAIL)
+    trans_top.pack(fill=tk.X, pady=(0, _s(6)))
+
+    led_sz = _s(10)
+    led_canvas = tk.Canvas(trans_top, width=led_sz, height=led_sz, bg=BG_RAIL, bd=0, highlightthickness=0)
+    led_canvas.pack(side=tk.LEFT, padx=(0, _s(8)), pady=_s(3))
+    led_dot_id = led_canvas.create_oval(_s(1), _s(1), led_sz - _s(1), led_sz - _s(1),
+                                        fill=TEXT_MUTED, outline="")
+
+    status_var = tk.StringVar(value=tr("status_idle"))
+    status_lbl = tk.Label(trans_top, textvariable=status_var, font=(FONT, 9),
+                          fg=TEXT_SEC, bg=BG_RAIL, anchor="w")
+    status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    progress_pct_var = tk.StringVar(value="0%")
+    pct_lbl = tk.Label(trans_top, textvariable=progress_pct_var, font=(MONO, 10, "bold"),
+                       fg=ACCENT_HOVER, bg=BG_RAIL)
+    pct_lbl.pack(side=tk.RIGHT, padx=(_s(10), 0))
+
+    console_toggle_btn = tk.Button(trans_top, text="", font=(MONO, 8, "bold"),
+                                   fg=TEXT_SEC, bg=BG_SLOT, activebackground=BG_SLOT_HOVER,
+                                   activeforeground=TEXT_PRI, relief=tk.FLAT, bd=0,
+                                   padx=_s(10), pady=_s(2), cursor="hand2", command=_toggle_console)
+    console_toggle_btn.pack(side=tk.RIGHT)
+    _refresh_console_btn()
+
+    progress_gauge = TransportProgressCanvas(trans_left)
+    progress_gauge.pack(fill=tk.X)
+
+    def _set_led(color: str):
+        led_canvas.itemconfigure(led_dot_id, fill=color)
+
+    def update_status(msg: str):
+        _post_ui(lambda: status_var.set(msg))
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  核心数据模型与内部拖拽状态机
+    # ══════════════════════════════════════════════════════════════════════
+    _task_store: dict[str, dict] = {}
+    _unpaired_pool: dict[str, dict] = {}
     _card_id_counter = 0
     _uid_counter = 0
-    _slot_registry = []   # list of dict(widget, type, cid, uid)
-    _highlighted_slot = None
+    _slot_registry: list[dict] = []
+    _highlighted_slot: dict | None = None
 
-    # 内部拖拽状态机
     _drag_info = {
         "active": False,
-        "type": None,          # "script" | "audio" | "audio_b"
+        "type": None,   # "script" | "audio" | "audio_b"
         "file": None,
         "name": None,
         "cid": None,
@@ -472,376 +1388,540 @@ def build_ui(ctx):
         "start_y": 0,
     }
 
-    def _truncate_filename(name: str, max_len=24) -> str:
-        if len(name) <= max_len:
-            return name
-        return name[:max_len - 6] + "…" + name[-5:]
-
     def _update_queue_meta():
-        count = len(_task_store)
-        done = sum(1 for item in _task_store.values() if item.get("status") == "done")
-        if count == 0:
-            queue_meta_var.set(tr("queue_empty_meta"))
-        elif done:
-            queue_meta_var.set(tr("queue_meta_done_format", count=count, done=done))
-        else:
-            queue_meta_var.set(tr("queue_meta_format", count=count))
+        total = len(_task_store)
+        done = sum(1 for t in _task_store.values() if t.get("status") == "done")
+        ready = sum(1 for t in _task_store.values()
+                    if t.get("script") and t.get("audio") and t.get("status") != "done")
+        kpi_total_v.configure(text=f"{total:02d}")
+        kpi_ready_v.configure(text=f"{ready:02d}")
+        kpi_done_v.configure(text=f"{done:02d}")
 
         if not getattr(root, "_fa_running", False):
-            start_btn.configure(text=tr("btn_start_with_count", count=count) if count else tr("btn_start"))
+            start_btn.configure(
+                text=f"▸  {tr('btn_start_with_count', count=ready)}" if ready else f"▸  {tr('btn_start')}",
+                bg=ACCENT if ready else "#1B2A3A",
+                fg=INK_DARK if ready else TEXT_MUTED,
+                activebackground=ACCENT_HOVER if ready else "#22364A",
+                activeforeground=INK_DARK if ready else TEXT_SEC,
+            )
+
+    def _is_persp_visible() -> bool:
+        return mode_var.get() == "multi_persp" or any(t.get("audio_b") for t in _task_store.values())
+
+    def _configure_matrix_grid(grid_frame: tk.Frame, show_b: bool):
+        grid_frame.grid_columnconfigure(0, weight=0, minsize=_s(34), uniform="c_idx")
+        grid_frame.grid_columnconfigure(1, weight=3, minsize=_s(120), uniform="c_slot")
+        grid_frame.grid_columnconfigure(2, weight=3, minsize=_s(120), uniform="c_slot")
+        grid_frame.grid_columnconfigure(3, weight=3, minsize=_s(120), uniform="c_slot")
+        if show_b:
+            grid_frame.grid_columnconfigure(4, weight=0, minsize=_s(34), uniform="c_swap")
+            grid_frame.grid_columnconfigure(5, weight=3, minsize=_s(120), uniform="c_slot")
+            grid_frame.grid_columnconfigure(6, weight=0, minsize=_s(82), uniform="c_act")
+        else:
+            grid_frame.grid_columnconfigure(4, weight=0, minsize=0, uniform="")
+            grid_frame.grid_columnconfigure(5, weight=0, minsize=0, uniform="")
+            grid_frame.grid_columnconfigure(6, weight=0, minsize=_s(82), uniform="c_act")
+        grid_frame.grid_rowconfigure(0, weight=1)
+
+    def _render_column_headers(show_b: bool):
+        for w in col_header_grid.winfo_children():
+            w.destroy()
+        _configure_matrix_grid(col_header_grid, show_b)
+
+        def _hdr(c, txt, anchor="w", mono=False):
+            tk.Label(col_header_grid, text=txt, font=(MONO if mono else FONT, 8, "bold"),
+                     fg=TEXT_MUTED, bg=BG_PANEL_ALT, anchor=anchor).grid(
+                row=0, column=c, sticky="ew", padx=_s(4))
+
+        _hdr(0, "#", mono=True)
+        _hdr(1, tr("col_name"))
+        _hdr(2, tr("col_script"))
+        _hdr(3, tr("col_persp_a") if show_b else tr("col_audio"))
+        if show_b:
+            _hdr(4, "⇄", "center", mono=True)
+            _hdr(5, tr("col_persp_b"))
+        _hdr(6, _etr("col_act"), "e")
+
+    def _render_empty_stage():
+        """无任务时绘制专业音频视窗风格的矢量空状态导入区。"""
+        col_header.pack_forget()
+        col_header_sep.pack_forget()
+
+        empty_cv = tk.Canvas(matrix_inner, bg=BG_STAGE, bd=0, highlightthickness=0, cursor="hand2")
+        empty_cv.pack(fill=tk.BOTH, expand=True, padx=_s(24), pady=_s(24))
+
+        hover_state = {"on": False}
+
+        def _draw_empty(_event=None):
+            empty_cv.delete("all")
+            w = max(empty_cv.winfo_width(), _s(500))
+            h = max(empty_cv.winfo_height(), _s(300))
+            pad = _s(12)
+            hov = hover_state["on"]
+            frame_bg = "#111723" if hov else "#0F131C"
+            dash_col = ACCENT_HOVER if hov else "#29354B"
+
+            # 背景矩形与技术虚线框
+            empty_cv.create_rectangle(pad, pad, w - pad, h - pad, fill=frame_bg, outline="")
+            empty_cv.create_rectangle(pad, pad, w - pad, h - pad, outline=dash_col,
+                                      width=max(1.0, _sf(1.5)), dash=(_s(6), _s(5)))
+
+            # 四角工业校准角标
+            corner = _s(14)
+            cw = max(2, _s(2))
+            for cx, cy, dx, dy in (
+                (pad, pad, corner, corner),
+                (w - pad, pad, -corner, corner),
+                (pad, h - pad, corner, -corner),
+                (w - pad, h - pad, -corner, -corner),
+            ):
+                empty_cv.create_line(cx, cy, cx + dx, cy, fill=ACCENT_HOVER if hov else BORDER_STRONG, width=cw)
+                empty_cv.create_line(cx, cy, cx, cy + dy, fill=ACCENT_HOVER if hov else BORDER_STRONG, width=cw)
+
+            mx, my = w // 2, h // 2 - _s(14)
+            # 矢量声波图标（零 Emoji，按 DPI 等比放大）
+            bar_heights = [10, 22, 36, 18, 44, 26, 14]
+            pitch = _s(9)
+            bar_w = _s(4)
+            start_x = mx - (len(bar_heights) * pitch) // 2
+            wave_cy = my - _s(40)
+            for idx, bh in enumerate(bar_heights):
+                bx = start_x + idx * pitch
+                sbh = _s(bh)
+                col = ACCENT_HOVER if (hov or idx in (2, 4)) else "#334460"
+                empty_cv.create_rectangle(bx, wave_cy - sbh // 2, bx + bar_w, wave_cy + sbh // 2,
+                                          fill=col, outline="")
+
+            prompt = tr("drop_prompt_persp") if mode_var.get() == "multi_persp" else tr("drop_prompt_normal")
+            empty_cv.create_text(mx, my + _s(8), text=prompt, fill=TEXT_PRI, font=(FONT, 12, "bold"))
+            empty_cv.create_text(mx, my + _s(34), text=_etr("empty_sub"), fill=TEXT_MUTED, font=(FONT, 9))
+
+            # 中心按钮胶囊
+            bw, bh_btn = _s(148), _s(34)
+            by0 = my + _s(58)
+            btn_bg = ACCENT if hov else ACCENT_DIM
+            btn_fg = INK_DARK if hov else ACCENT_HOVER
+            empty_cv.create_rectangle(mx - bw // 2, by0, mx + bw // 2, by0 + bh_btn,
+                                      fill=btn_bg, outline=ACCENT_HOVER, width=1)
+            empty_cv.create_text(mx, by0 + bh_btn // 2, text=_etr("import_files"),
+                                 fill=btn_fg, font=(FONT, 9, "bold"))
+
+        empty_cv.bind("<Configure>", _draw_empty)
+        empty_cv.bind("<Enter>", lambda _e: (hover_state.update(on=True), _draw_empty()))
+        empty_cv.bind("<Leave>", lambda _e: (hover_state.update(on=False), _draw_empty()))
+        empty_cv.bind("<Button-1>", _browse_files)
+
+        if ctx.has_dnd:
+            empty_cv.drop_target_register(ctx.dnd_files)
+            empty_cv.dnd_bind("<<Drop>>", _on_external_drop)
+
+        _slot_registry.append({
+            "widget": empty_cv, "type": "new_card", "cid": None, "uid": None,
+            "rest_border": BORDER, "rest_thick": 0, "in_matrix": True,
+        })
+        matrix_canvas.update_idletasks()
+        matrix_canvas.itemconfig(matrix_win_id, height=max(matrix_canvas.winfo_height(), _s(280)))
+
+    def _bind_drop_targets(*widgets):
+        if not ctx.has_dnd:
+            return
+        for w in widgets:
+            try:
+                w.drop_target_register(ctx.dnd_files)
+                w.dnd_bind("<<Drop>>", _on_external_drop)
+            except Exception:
+                pass
 
     def _render_all_cards():
-        """渲染未配对素材托盘与全部对齐任务卡片。"""
+        """渲染未配对素材坞与中央多轨编排矩阵。"""
         nonlocal _highlighted_slot
         _slot_registry.clear()
         _highlighted_slot = None
 
-        # 1. 渲染待分配素材托盘
-        for child in tray_items_container.winfo_children():
-            child.destroy()
+        # 1. 未配对暂存坞
+        for w in dock_items.winfo_children():
+            w.destroy()
 
         if _unpaired_pool:
-            tray_frame.pack(fill=tk.X, pady=(0, 8), before=cards_wrapper)
-            # 托盘整体注册为投放目标（可拖出卡片放回托盘）
-            _slot_registry.append({"widget": tray_frame, "type": "tray", "cid": None, "uid": None})
-            for uid, item in list(_unpaired_pool.items()):
+            dock_frame.pack(fill=tk.X, padx=_s(16), pady=(_s(10), 0), before=matrix_outer)
+            _slot_registry.append({
+                "widget": dock_frame, "type": "tray", "cid": None, "uid": None,
+                "rest_border": "#423117", "rest_thick": 1, "in_matrix": False,
+            })
+            # 简易自动换行行容器（每行最多放 4 枚芯片）
+            row_f = None
+            for idx, (uid, item) in enumerate(list(_unpaired_pool.items())):
+                if idx % 4 == 0:
+                    row_f = tk.Frame(dock_items, bg="#151311")
+                    row_f.pack(fill=tk.X, pady=(0, _s(4)))
+                    _bind_drop_targets(row_f)
                 p_file = item["file"]
                 p_type = item["type"]
                 p_name = os.path.basename(p_file)
-                icon = "📄" if p_type == "script" else "🎵"
-                fg_c = PINK if p_type == "script" else LAVENDER
+                tag_txt = "TXT" if p_type == "script" else "AUD"
+                tag_fg = ACCENT_HOVER if p_type == "script" else AMBER
+                tag_bg = ACCENT_DIM if p_type == "script" else AMBER_DIM
 
-                pill = tk.Frame(tray_items_container, bg=SURFACE, highlightbackground=BORDER,
-                                highlightthickness=1, cursor="hand2", padx=8, pady=4)
-                pill.pack(side=tk.LEFT, padx=(0, 6), pady=2)
-                tk.Label(pill, text=f"{icon}  {_truncate_filename(p_name, 22)}", font=(FONT, 8),
-                         fg=TEXT, bg=SURFACE).pack(side=tk.LEFT)
+                pill = tk.Frame(row_f, bg=BG_SLOT, highlightbackground=BORDER,
+                                highlightthickness=1, cursor="hand2", padx=_s(6), pady=_s(4))
+                pill.pack(side=tk.LEFT, padx=(0, _s(6)))
+                t_tag = tk.Label(pill, text=tag_txt, font=(MONO, 7, "bold"),
+                                 fg=tag_fg, bg=tag_bg, padx=_s(4), pady=_s(1))
+                t_tag.pack(side=tk.LEFT, padx=(0, _s(6)))
+                t_lbl = tk.Label(pill, text=_truncate_filename(p_name, 22),
+                                 font=(FONT, 8), fg=TEXT_PRI, bg=BG_SLOT)
+                t_lbl.pack(side=tk.LEFT)
                 ToolTip(pill, p_file)
 
-                def _start_tray_drag(e, u=uid, p=p_file, t=p_type, n=p_name):
-                    _on_drag_press(e, p_type=t, p_file=p, p_name=n, cid=None, uid=u)
+                def _start_dock_drag(e, u=uid, p=p_file, tp=p_type, n=p_name):
+                    _on_drag_press(e, p_type=tp, p_file=p, p_name=n, cid=None, uid=u)
 
-                pill.bind("<ButtonPress-1>", _start_tray_drag)
-                pill.bind("<B1-Motion>", _on_drag_motion)
-                pill.bind("<ButtonRelease-1>", _on_drag_release)
-                for c in pill.winfo_children():
-                    c.bind("<ButtonPress-1>", _start_tray_drag)
-                    c.bind("<B1-Motion>", _on_drag_motion)
-                    c.bind("<ButtonRelease-1>", _on_drag_release)
+                for w in (pill, t_tag, t_lbl):
+                    w.bind("<ButtonPress-1>", _start_dock_drag)
+                    w.bind("<B1-Motion>", _on_drag_motion)
+                    w.bind("<ButtonRelease-1>", _on_drag_release)
+                _bind_drop_targets(pill, t_tag, t_lbl)
         else:
-            tray_frame.pack_forget()
+            dock_frame.pack_forget()
 
-        # 2. 渲染任务卡片
-        for child in cards_inner.winfo_children():
-            child.destroy()
+        # 2. 清空轨道视口
+        for w in matrix_inner.winfo_children():
+            w.destroy()
 
         if not _task_store:
-            empty_box = tk.Frame(cards_inner, bg=PINK_BG, highlightbackground=BORDER_DASHED,
-                                 highlightthickness=2, padx=20, pady=40, cursor="hand2")
-            empty_box.pack(fill=tk.BOTH, expand=True, padx=4, pady=10)
-            _label(empty_box, "📥", 26, PINK).pack(pady=(0, 4))
-            _label(empty_box, "拖拽素材至此新建任务卡片", 10, TEXT, bold=True).pack()
-            _label(empty_box, "可将上方待分配素材拖至此区域直接创建任务，并继续拖入其余视角素材配对", 8, MUTED).pack(pady=(2, 0))
-            _slot_registry.append({"widget": empty_box, "type": "new_card", "cid": None, "uid": None})
+            _render_empty_stage()
             _update_queue_meta()
             return
 
-        is_persp = mode_var.get() == "multi_persp"
+        # 恢复自适应高度（空状态曾显式设满视口高度）
+        matrix_canvas.itemconfig(matrix_win_id, height=0)
 
-        for cid, task in list(_task_store.items()):
-            card = tk.Frame(cards_inner, bg=PANEL, highlightbackground=BORDER,
-                            highlightthickness=1, padx=12, pady=10)
-            card.pack(fill=tk.X, pady=(0, 8), padx=2)
-            card.bind("<MouseWheel>", _on_mousewheel)
+        show_b = _is_persp_visible()
+        _render_column_headers(show_b)
+        col_header.pack(fill=tk.X, before=matrix_scroll_wrap)
+        col_header_sep.pack(fill=tk.X, before=matrix_scroll_wrap)
 
-            # 顶部信息栏
-            top_row = tk.Frame(card, bg=PANEL)
-            top_row.pack(fill=tk.X, pady=(0, 8))
-            top_row.bind("<MouseWheel>", _on_mousewheel)
+        def _make_slot_chip(parent, cid, slot_type, file_path, badge_code, empty_text, accent_fg, accent_bg, picker_fn):
+            has_file = bool(file_path)
+            bg_c = BG_SLOT if has_file else BG_SLOT_EMPTY
+            bd_c = BORDER if has_file else "#253046"
 
-            t_name = task.get("name") or "未命名任务"
-            tk.Label(top_row, text=t_name, font=(FONT, 9, "bold"), fg=TEXT, bg=PANEL).pack(side=tk.LEFT)
+            chip = tk.Frame(parent, bg=bg_c, highlightbackground=bd_c,
+                            highlightthickness=1, cursor="hand2", padx=_s(8), pady=_s(5))
+            _slot_registry.append({
+                "widget": chip, "type": slot_type, "cid": cid, "uid": None,
+                "rest_border": bd_c, "rest_thick": 1, "in_matrix": True,
+            })
 
-            # 徽章：状态 / 置信度
-            st = task.get("status", "pending")
-            conf = task.get("confidence")
-            badge_text = get_status_icon(st)
-            badge_fg = MUTED
-            badge_bg = SURFACE
-            if st == "done":
-                badge_fg = MINT
-                badge_bg = "#eaf4ef"
-            elif st == "running":
-                badge_fg = PINK
-                badge_bg = PINK_DARK
-            elif st == "failed":
-                badge_fg = RED
-                badge_bg = "#fbecee"
-            elif not task.get("script") or not task.get("audio"):
-                badge_text = tr("status_warn")
-                badge_fg = AMBER
-                badge_bg = "#fbf4e8"
-            elif conf and conf < 95:
-                badge_text = tr("badge_fuzzy", score=conf)
-                badge_fg = AMBER
-                badge_bg = "#fbf4e8"
+            if has_file:
+                fname = os.path.basename(file_path)
+                tag = tk.Label(chip, text=badge_code, font=(MONO, 7, "bold"),
+                               fg=accent_fg, bg=accent_bg, padx=_s(4), pady=_s(1))
+                tag.pack(side=tk.LEFT, padx=(0, _s(6)))
+                lbl = tk.Label(chip, text=_truncate_filename(fname, 16 if show_b else 24),
+                               font=(FONT, 8), fg=TEXT_PRI, bg=bg_c, anchor="w")
+                lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                ToolTip(chip, file_path)
 
-            badge_lbl = tk.Label(top_row, text=f"  {badge_text}  ", font=(FONT, 8, "bold"),
-                                 fg=badge_fg, bg=badge_bg, padx=4, pady=2)
-            badge_lbl.pack(side=tk.LEFT, padx=10)
+                def _start(e, c=cid, p=file_path, n=fname, st=slot_type):
+                    _on_drag_press(e, p_type=st, p_file=p, p_name=n, cid=c, uid=None)
 
-            # 右侧删除按钮 ×
-            del_lbl = tk.Label(top_row, text=" × ", font=(FONT, 10, "bold"), fg=SUBTLE,
-                               bg=PANEL, cursor="hand2")
-            del_lbl.pack(side=tk.RIGHT)
-            del_lbl.bind("<Enter>", lambda e, w=del_lbl: w.configure(fg=RED))
-            del_lbl.bind("<Leave>", lambda e, w=del_lbl: w.configure(fg=SUBTLE))
+                for w in (chip, tag, lbl):
+                    w.bind("<ButtonPress-1>", _start)
+                    w.bind("<B1-Motion>", _on_drag_motion)
+                    w.bind("<ButtonRelease-1>", _on_drag_release)
+                    w.bind("<Button-3>", lambda e, c=cid: _show_card_context_menu(e, c))
+                _bind_drop_targets(chip, tag, lbl)
+            else:
+                ph = tk.Label(chip, text=empty_text, font=(FONT, 8),
+                              fg=TEXT_MUTED, bg=bg_c, anchor="center")
+                ph.pack(fill=tk.X)
+                for w in (chip, ph):
+                    w.bind("<Button-1>", lambda _e, c=cid: picker_fn(c))
+                    w.bind("<Enter>", lambda _e, f=chip, p=ph: (f.configure(highlightbackground=accent_fg), p.configure(fg=accent_fg)))
+                    w.bind("<Leave>", lambda _e, f=chip, p=ph, b=bd_c: (f.configure(highlightbackground=b), p.configure(fg=TEXT_MUTED)))
+                _bind_drop_targets(chip, ph)
+            return chip
 
-            def _delete_card(_e, c=cid):
-                if ctx.is_running():
-                    return
-                _task_store.pop(c, None)
+        def _pick_script(cid):
+            if ctx.is_running():
+                return
+            path = filedialog.askopenfilename(
+                title=_etr("pick_script_title"),
+                filetypes=[(tr("dlg_filter_supported"), "*.txt"), (tr("dlg_filter_all"), "*.*")])
+            if path and cid in _task_store:
+                _task_store[cid]["script"] = os.path.abspath(path)
                 _render_all_cards()
-                _update_queue_meta()
-            del_lbl.bind("<Button-1>", _delete_card)
 
-            # 下方插槽栏
-            slots_row = tk.Frame(card, bg=PANEL)
-            slots_row.pack(fill=tk.X)
-            slots_row.bind("<MouseWheel>", _on_mousewheel)
+        def _pick_audio(cid):
+            if ctx.is_running():
+                return
+            path = filedialog.askopenfilename(
+                title=_etr("pick_audio_title"),
+                filetypes=[(tr("dlg_filter_audio"), "*.wav;*.mp3;*.flac;*.m4a;*.ogg;*.aac;*.opus"),
+                           (tr("dlg_filter_all"), "*.*")])
+            if path and cid in _task_store:
+                _task_store[cid]["audio"] = os.path.abspath(path)
+                _render_all_cards()
 
-            # 1. 台本插槽
-            s_file = task.get("script")
-            s_frame = tk.Frame(slots_row, bg=SURFACE if s_file else PINK_BG,
-                               highlightbackground=BORDER if s_file else BORDER_DASHED,
-                               highlightthickness=1, padx=10, pady=6, cursor="hand2")
-            s_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-            _slot_registry.append({"widget": s_frame, "type": "script", "cid": cid, "uid": None})
+        def _pick_audio_b(cid):
+            if ctx.is_running():
+                return
+            path = filedialog.askopenfilename(
+                title=_etr("pick_audio_b_title"),
+                filetypes=[(tr("dlg_filter_audio"), "*.wav;*.mp3;*.flac;*.m4a;*.ogg;*.aac;*.opus"),
+                           (tr("dlg_filter_all"), "*.*")])
+            if path and cid in _task_store:
+                _task_store[cid]["audio_b"] = os.path.abspath(path)
+                _render_all_cards()
 
-            if s_file:
-                s_name = os.path.basename(s_file)
-                tk.Label(s_frame, text=f"📄  {_truncate_filename(s_name, 22)}", font=(FONT, 9),
-                         fg=TEXT, bg=SURFACE).pack(side=tk.LEFT)
-                ToolTip(s_frame, s_file)
+        # 3. 逐条渲染水平轨道条（DAW Arrangement Strips）
+        for row_idx, (cid, task) in enumerate(list(_task_store.items())):
+            st = task.get("status", "pending")
+            conf = task.get("confidence", 100)
+            incomplete = not task.get("script") or not task.get("audio")
 
-                def _start_s_drag(e, c=cid, p=s_file, n=s_name):
-                    _on_drag_press(e, p_type="script", p_file=p, p_name=n, cid=c, uid=None)
-
-                s_frame.bind("<ButtonPress-1>", _start_s_drag)
-                s_frame.bind("<B1-Motion>", _on_drag_motion)
-                s_frame.bind("<ButtonRelease-1>", _on_drag_release)
-                for w in s_frame.winfo_children():
-                    w.bind("<ButtonPress-1>", _start_s_drag)
-                    w.bind("<B1-Motion>", _on_drag_motion)
-                    w.bind("<ButtonRelease-1>", _on_drag_release)
+            if st == "running":
+                led_col, badge_fg, badge_bg, badge_txt = ACCENT_HOVER, ACCENT_HOVER, ACCENT_DIM, tr("status_running")
+            elif st == "done":
+                led_col, badge_fg, badge_bg, badge_txt = EMERALD, EMERALD, EMERALD_DIM, tr("status_done")
+            elif st == "failed":
+                led_col, badge_fg, badge_bg, badge_txt = CRIMSON, CRIMSON, CRIMSON_DIM, tr("status_failed")
+            elif incomplete:
+                led_col, badge_fg, badge_bg, badge_txt = AMBER, AMBER, AMBER_DIM, tr("status_warn")
+            elif conf and conf < 95:
+                led_col, badge_fg, badge_bg, badge_txt = AMBER, AMBER, AMBER_DIM, tr("badge_fuzzy", score=conf)
             else:
-                s_ph = tk.Label(s_frame, text=tr("slot_script_empty"), font=(FONT, 8),
-                                fg=PINK, bg=PINK_BG)
-                s_ph.pack()
+                led_col, badge_fg, badge_bg, badge_txt = "#334155", TEXT_SEC, BG_SLOT, tr("status_pending")
 
-                def _pick_script(_e, c=cid):
-                    file = filedialog.askopenfilename(
-                        title="选择台本文件",
-                        filetypes=[(tr("dlg_filter_supported"), "*.txt"), (tr("dlg_filter_all"), "*.*")])
-                    if file:
-                        _task_store[c]["script"] = os.path.abspath(file)
-                        _render_all_cards()
-                        _update_queue_meta()
-                s_frame.bind("<Button-1>", _pick_script)
-                s_ph.bind("<Button-1>", _pick_script)
+            row_bg = BG_PANEL if row_idx % 2 == 0 else BG_PANEL_ALT
+            strip_outer = tk.Frame(matrix_inner, bg=row_bg)
+            strip_outer.pack(fill=tk.X)
 
-            # 连接符号
-            tk.Label(slots_row, text=" ── ", font=(MONO, 8), fg="#d0c6cc", bg=PANEL).pack(side=tk.LEFT)
+            strip = tk.Frame(strip_outer, bg=row_bg, height=_s(58))
+            strip.pack(fill=tk.X)
+            strip.pack_propagate(False)
 
-            # 2. 音频插槽 1
-            a_file = task.get("audio")
-            a_frame = tk.Frame(slots_row, bg=SURFACE if a_file else PINK_BG,
-                               highlightbackground=BORDER if a_file else BORDER_DASHED,
-                               highlightthickness=1, padx=10, pady=6, cursor="hand2")
-            a_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6 if is_persp else 0))
-            _slot_registry.append({"widget": a_frame, "type": "audio", "cid": cid, "uid": None})
+            # 左侧等比状态灯条
+            tk.Frame(strip, bg=led_col, width=_s(3)).pack(side=tk.LEFT, fill=tk.Y)
 
-            if a_file:
-                a_name = os.path.basename(a_file)
-                tk.Label(a_frame, text=f"🎵  {_truncate_filename(a_name, 22)}", font=(FONT, 9),
-                         fg=TEXT, bg=SURFACE).pack(side=tk.LEFT)
-                ToolTip(a_frame, a_file)
+            grid_body = tk.Frame(strip, bg=row_bg, padx=_s(14))
+            grid_body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            _configure_matrix_grid(grid_body, show_b)
 
-                def _start_a_drag(e, c=cid, p=a_file, n=a_name):
-                    _on_drag_press(e, p_type="audio", p_file=p, p_name=n, cid=c, uid=None)
+            # 列 0：等宽轨号
+            idx_lbl = tk.Label(grid_body, text=f"{row_idx + 1:02d}", font=(MONO, 9, "bold"),
+                               fg=led_col if st == "running" else TEXT_MUTED, bg=row_bg, anchor="w")
+            idx_lbl.grid(row=0, column=0, sticky="ew", padx=_s(4))
 
-                a_frame.bind("<ButtonPress-1>", _start_a_drag)
-                a_frame.bind("<B1-Motion>", _on_drag_motion)
-                a_frame.bind("<ButtonRelease-1>", _on_drag_release)
-                for w in a_frame.winfo_children():
-                    w.bind("<ButtonPress-1>", _start_a_drag)
-                    w.bind("<B1-Motion>", _on_drag_motion)
-                    w.bind("<ButtonRelease-1>", _on_drag_release)
-            else:
-                a_ph = tk.Label(a_frame, text=tr("slot_audio_empty"), font=(FONT, 8),
-                                fg=PINK, bg=PINK_BG)
-                a_ph.pack()
+            # 列 1：轨道名 + 状态微胶囊
+            meta_box = tk.Frame(grid_body, bg=row_bg)
+            meta_box.grid(row=0, column=1, sticky="ew", padx=_s(4))
+            t_name = task.get("name") or _etr("untitled_track")
+            name_lbl = tk.Label(meta_box, text=_truncate_filename(t_name, 18 if show_b else 24),
+                                font=(FONT, 9, "bold"), fg=TEXT_PRI, bg=row_bg, anchor="w")
+            name_lbl.pack(anchor="w", fill=tk.X)
+            ToolTip(name_lbl, t_name)
+            st_pill = tk.Label(meta_box, text=badge_txt, font=(FONT, 7, "bold"),
+                               fg=badge_fg, bg=badge_bg, padx=_s(6), pady=_s(1))
+            st_pill.pack(anchor="w", pady=(_s(3), 0))
 
-                def _pick_audio(_e, c=cid):
-                    file = filedialog.askopenfilename(
-                        title="选择音频文件",
-                        filetypes=[(tr("dlg_filter_audio"), "*.wav;*.mp3;*.flac;*.m4a;*.ogg;*.aac;*.opus"),
-                                   (tr("dlg_filter_all"), "*.*")])
-                    if file:
-                        _task_store[c]["audio"] = os.path.abspath(file)
-                        _render_all_cards()
-                        _update_queue_meta()
-                a_frame.bind("<Button-1>", _pick_audio)
-                a_ph.bind("<Button-1>", _pick_audio)
+            # 列 2：台本槽位
+            s_chip = _make_slot_chip(
+                grid_body, cid, "script", task.get("script"), "TXT",
+                tr("slot_script_empty"), ACCENT_HOVER, ACCENT_DIM, _pick_script,
+            )
+            s_chip.grid(row=0, column=2, sticky="ew", padx=_s(4))
 
-            # 3. 双视角副音频插槽（若为双视角模式或已有副音频）
-            if is_persp or task.get("audio_b"):
-                # 一键左右交换按钮 ⇄
-                swap_lbl = tk.Label(slots_row, text=" ⇄ ", font=(FONT, 9, "bold"), fg=PINK,
-                                    bg=SURFACE, padx=4, pady=4, cursor="hand2")
-                swap_lbl.pack(side=tk.LEFT, padx=(2, 6))
-                ToolTip(swap_lbl, tr("swap_tooltip"))
+            # 列 3：主音频槽位
+            a_chip = _make_slot_chip(
+                grid_body, cid, "audio", task.get("audio"), "A" if show_b else "AUD",
+                tr("slot_audio_empty"), EMERALD if not show_b else ACCENT_HOVER,
+                EMERALD_DIM if not show_b else ACCENT_DIM, _pick_audio,
+            )
+            a_chip.grid(row=0, column=3, sticky="ew", padx=_s(4))
 
-                def _swap_audios(_e, c=cid):
+            # 列 4 & 5：双视角交换按钮 + 副音频槽位
+            if show_b:
+                def _swap_ab(_e, c=cid):
+                    if ctx.is_running():
+                        return
                     t = _task_store.get(c)
                     if t:
                         t["audio"], t["audio_b"] = t.get("audio_b"), t.get("audio")
                         _render_all_cards()
-                swap_lbl.bind("<Button-1>", _swap_audios)
 
-                b_file = task.get("audio_b")
-                b_frame = tk.Frame(slots_row, bg=SURFACE if b_file else PINK_BG,
-                                   highlightbackground=BORDER if b_file else BORDER_DASHED,
-                                   highlightthickness=1, padx=10, pady=6, cursor="hand2")
-                b_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-                _slot_registry.append({"widget": b_frame, "type": "audio_b", "cid": cid, "uid": None})
+                swap_btn = tk.Label(grid_body, text="⇄", font=(MONO, 10, "bold"),
+                                    fg=AMBER, bg=AMBER_DIM, padx=_s(5), pady=_s(4), cursor="hand2")
+                swap_btn.grid(row=0, column=4, padx=_s(2))
+                swap_btn.bind("<Button-1>", _swap_ab)
+                ToolTip(swap_btn, tr("swap_tooltip"))
 
-                if b_file:
-                    b_name = os.path.basename(b_file)
-                    tk.Label(b_frame, text=f"🎧  {_truncate_filename(b_name, 22)}", font=(FONT, 9),
-                             fg=TEXT, bg=SURFACE).pack(side=tk.LEFT)
-                    ToolTip(b_frame, b_file)
+                b_chip = _make_slot_chip(
+                    grid_body, cid, "audio_b", task.get("audio_b"), "B",
+                    tr("slot_audio_b_empty"), AMBER, AMBER_DIM, _pick_audio_b,
+                )
+                b_chip.grid(row=0, column=5, sticky="ew", padx=_s(4))
 
-                    def _start_b_drag(e, c=cid, p=b_file, n=b_name):
-                        _on_drag_press(e, p_type="audio_b", p_file=p, p_name=n, cid=c, uid=None)
+            # 列 6：内联快捷操作区（打开 / 重试 / 删除）
+            act_box = tk.Frame(grid_body, bg=row_bg)
+            act_box.grid(row=0, column=6, sticky="e", padx=(_s(4), 0))
 
-                    b_frame.bind("<ButtonPress-1>", _start_b_drag)
-                    b_frame.bind("<B1-Motion>", _on_drag_motion)
-                    b_frame.bind("<ButtonRelease-1>", _on_drag_release)
-                    for w in b_frame.winfo_children():
-                        w.bind("<ButtonPress-1>", _start_b_drag)
-                        w.bind("<B1-Motion>", _on_drag_motion)
-                        w.bind("<ButtonRelease-1>", _on_drag_release)
-                else:
-                    b_ph = tk.Label(b_frame, text=tr("slot_audio_b_empty"), font=(FONT, 8),
-                                    fg=PINK, bg=PINK_BG)
-                    b_ph.pack()
+            def _make_micro_btn(symbol, tip_key, hover_fg, cmd):
+                b = tk.Label(act_box, text=symbol, font=(MONO, 10, "bold"),
+                             fg=TEXT_MUTED, bg=row_bg, padx=_s(5), pady=_s(3), cursor="hand2")
+                b.pack(side=tk.LEFT, padx=_s(1))
+                b.bind("<Button-1>", lambda _e: cmd())
+                b.bind("<Enter>", lambda _e: b.configure(fg=hover_fg, bg=BG_SLOT))
+                b.bind("<Leave>", lambda _e: b.configure(fg=TEXT_MUTED, bg=row_bg))
+                ToolTip(b, _etr(tip_key))
+                return b
 
-                    def _pick_audio_b(_e, c=cid):
-                        file = filedialog.askopenfilename(
-                            title="选择副音频文件",
-                            filetypes=[(tr("dlg_filter_audio"), "*.wav;*.mp3;*.flac;*.m4a;*.ogg;*.aac;*.opus"),
-                                       (tr("dlg_filter_all"), "*.*")])
-                        if file:
-                            _task_store[c]["audio_b"] = os.path.abspath(file)
-                            _render_all_cards()
-                            _update_queue_meta()
-                    b_frame.bind("<Button-1>", _pick_audio_b)
-                    b_ph.bind("<Button-1>", _pick_audio_b)
+            def _remove_track(c=cid):
+                if ctx.is_running():
+                    return
+                _task_store.pop(c, None)
+                _render_all_cards()
 
-            # 右键上下文菜单绑定
-            def _popup_menu(event, c=cid):
-                _show_card_context_menu(event, c)
-            card.bind("<Button-3>", _popup_menu)
-            top_row.bind("<Button-3>", _popup_menu)
-            slots_row.bind("<Button-3>", _popup_menu)
+            def _requeue_track(c=cid):
+                if ctx.is_running():
+                    return
+                t = _task_store.get(c)
+                if t:
+                    t["status"] = "pending"
+                    _render_all_cards()
+                    update_status(tr("status_requeued", name=t["name"]))
 
-            # 双击快速打开结果
-            def _double_open(_e, c=cid):
-                _on_card_double_click(c)
-            card.bind("<Double-1>", _double_open)
-            top_row.bind("<Double-1>", _double_open)
+            _make_micro_btn("↗", "tip_open", ACCENT_HOVER, lambda c=cid: _on_card_double_click(c))
+            _make_micro_btn("↻", "tip_retry", AMBER, _requeue_track)
+            _make_micro_btn("×", "tip_remove", CRIMSON, _remove_track)
 
-        # 队列已有卡片时，在末尾保留轻量新建槽
-        bottom_add_slot = tk.Frame(cards_inner, bg=SURFACE, highlightbackground=BORDER_DASHED,
-                                   highlightthickness=1, padx=12, pady=8, cursor="hand2")
-        bottom_add_slot.pack(fill=tk.X, padx=2, pady=(4, 10))
-        _label(bottom_add_slot, "＋ 拖拽素材至此新建任务卡片", 9, MUTED).pack()
-        _slot_registry.append({"widget": bottom_add_slot, "type": "new_card", "cid": None, "uid": None})
+            # 行级双击、右键菜单与外部拖放
+            for w in (strip, grid_body, idx_lbl, meta_box, name_lbl, st_pill):
+                w.bind("<Button-3>", lambda e, c=cid: _show_card_context_menu(e, c))
+                w.bind("<Double-1>", lambda _e, c=cid: _on_card_double_click(c))
+            _bind_drop_targets(strip_outer, strip, grid_body, idx_lbl, meta_box, name_lbl, st_pill, act_box)
+
+            # 行底微弱分隔线
+            tk.Frame(strip_outer, bg=BORDER_SUBTLE, height=1).pack(fill=tk.X)
+
+        # 底部轻量新建轨道投放条
+        new_bar = tk.Frame(matrix_inner, bg=BG_SLOT_EMPTY, highlightbackground=BORDER,
+                           highlightthickness=1, padx=_s(14), pady=_s(10), cursor="hand2")
+        new_bar.pack(fill=tk.X, padx=_s(16), pady=_s(12))
+        new_lbl = tk.Label(new_bar, text=_etr("new_track_drop"), font=(FONT, 8),
+                           fg=TEXT_MUTED, bg=BG_SLOT_EMPTY)
+        new_lbl.pack()
+        for w in (new_bar, new_lbl):
+            w.bind("<Button-1>", _browse_files)
+            w.bind("<Enter>", lambda _e: (new_bar.configure(highlightbackground=ACCENT), new_lbl.configure(fg=ACCENT_HOVER)))
+            w.bind("<Leave>", lambda _e: (new_bar.configure(highlightbackground=BORDER), new_lbl.configure(fg=TEXT_MUTED)))
+        _bind_drop_targets(new_bar, new_lbl)
+        _slot_registry.append({
+            "widget": new_bar, "type": "new_card", "cid": None, "uid": None,
+            "rest_border": BORDER, "rest_thick": 1, "in_matrix": True,
+        })
 
         _update_queue_meta()
 
-    # ── 拖拽交互手势 ────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    #  内部拖拽交互手势（支持槽位互换 / 拖入暂存坞 / 拖建新轨）
+    # ══════════════════════════════════════════════════════════════════════
 
     def _on_drag_press(event, p_type, p_file, p_name, cid, uid):
         if ctx.is_running():
             return
-        _drag_info["active"] = False
-        _drag_info["type"] = p_type
-        _drag_info["file"] = p_file
-        _drag_info["name"] = p_name
-        _drag_info["cid"] = cid
-        _drag_info["uid"] = uid
-        _drag_info["start_x"] = event.x_root
-        _drag_info["start_y"] = event.y_root
+        _drag_info.update(
+            active=False, type=p_type, file=p_file, name=p_name,
+            cid=cid, uid=uid, start_x=event.x_root, start_y=event.y_root,
+        )
 
     def _on_drag_motion(event):
         if not _drag_info["file"]:
             return
-        dx = abs(event.x_root - _drag_info["start_x"])
-        dy = abs(event.y_root - _drag_info["start_y"])
-        if not _drag_info["active"] and (dx > 4 or dy > 4):
+        drag_thresh = _s(4)
+        if not _drag_info["active"] and (
+            abs(event.x_root - _drag_info["start_x"]) > drag_thresh
+            or abs(event.y_root - _drag_info["start_y"]) > drag_thresh
+        ):
             _drag_info["active"] = True
-            # 创建跟随光标的半透明悬浮指示窗
             win = tk.Toplevel(root)
             win.wm_overrideredirect(True)
             win.attributes("-topmost", True)
             try:
-                win.attributes("-alpha", 0.90)
+                win.attributes("-alpha", 0.92)
             except Exception:
                 pass
-            p_icon = "📄" if _drag_info["type"] == "script" else "🎵"
-            lbl = tk.Label(win, text=f" {p_icon} {_truncate_filename(_drag_info['name'], 20)} ",
-                           font=(FONT, 9, "bold"), bg=PINK_DARK, fg=PINK,
-                           bd=1, relief=tk.SOLID, padx=8, pady=4)
-            lbl.pack()
+            tag = "TXT" if _drag_info["type"] == "script" else "AUD"
+            col = ACCENT_HOVER if tag == "TXT" else AMBER
+            box = tk.Frame(win, bg="#0F172A", highlightbackground=col, highlightthickness=1,
+                           padx=_s(10), pady=_s(5))
+            box.pack()
+            tk.Label(box, text=tag, font=(MONO, 7, "bold"), fg=INK_DARK, bg=col,
+                     padx=_s(4), pady=_s(1)).pack(side=tk.LEFT, padx=(0, _s(6)))
+            tk.Label(box, text=_truncate_filename(_drag_info["name"], 24),
+                     font=(FONT, 8, "bold"), fg=TEXT_PRI, bg="#0F172A").pack(side=tk.LEFT)
             _drag_info["win"] = win
 
         if _drag_info["active"] and _drag_info["win"]:
-            _drag_info["win"].geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
-            # 高亮探测当前光标下命中的槽位
+            off = _s(14)
+            _drag_info["win"].geometry(f"+{event.x_root + off}+{event.y_root + off}")
             _update_drag_hover(event.x_root, event.y_root)
 
-    def _update_drag_hover(x, y):
+    def _is_slot_compatible(src_type: str, tgt_type: str) -> bool:
+        if tgt_type in ("tray", "new_card"):
+            return True
+        is_src_aud = src_type in ("audio", "audio_b")
+        is_tgt_aud = tgt_type in ("audio", "audio_b")
+        return (src_type == "script" and tgt_type == "script") or (is_src_aud and is_tgt_aud)
+
+    def _restore_slot_border(slot: dict):
+        try:
+            slot["widget"].configure(
+                highlightbackground=slot.get("rest_border", BORDER),
+                highlightthickness=slot.get("rest_thick", 1),
+            )
+        except Exception:
+            pass
+
+    def _update_drag_hover(x: int, y: int):
         nonlocal _highlighted_slot
         matched = None
+        # 计算轨道矩阵可见视口，避免已滚出顶/底部的槽位在坐标上误抢占暂存坞或顶栏命中
+        cv_x0 = matrix_canvas.winfo_rootx()
+        cv_y0 = matrix_canvas.winfo_rooty()
+        cv_x1 = cv_x0 + matrix_canvas.winfo_width()
+        cv_y1 = cv_y0 + matrix_canvas.winfo_height()
+        in_matrix_view = (cv_x0 <= x <= cv_x1 and cv_y0 <= y <= cv_y1)
+
         for item in _slot_registry:
+            if item.get("in_matrix") and not in_matrix_view:
+                continue
             w = item["widget"]
             if not w.winfo_exists() or not w.winfo_ismapped():
                 continue
-            rx = w.winfo_rootx()
-            ry = w.winfo_rooty()
-            rw = w.winfo_width()
-            rh = w.winfo_height()
-            if rx <= x <= rx + rw and ry <= y <= ry + rh:
+            rx, ry = w.winfo_rootx(), w.winfo_rooty()
+            if rx <= x <= rx + w.winfo_width() and ry <= y <= ry + w.winfo_height():
                 matched = item
                 break
 
         if matched != _highlighted_slot:
             if _highlighted_slot:
-                try:
-                    _highlighted_slot["widget"].configure(highlightbackground=BORDER, highlightthickness=1)
-                except Exception:
-                    pass
+                _restore_slot_border(_highlighted_slot)
             _highlighted_slot = matched
             if _highlighted_slot:
+                ok = _is_slot_compatible(_drag_info["type"], _highlighted_slot["type"])
                 try:
-                    _highlighted_slot["widget"].configure(highlightbackground=PINK, highlightthickness=2)
+                    _highlighted_slot["widget"].configure(
+                        highlightbackground=ACCENT_HOVER if ok else CRIMSON,
+                        highlightthickness=2,
+                    )
                 except Exception:
                     pass
 
-    def _on_drag_release(event):
-        nonlocal _highlighted_slot
+    def _on_drag_release(_event):
+        nonlocal _highlighted_slot, _uid_counter, _card_id_counter
         if _drag_info["win"]:
             try:
                 _drag_info["win"].destroy()
@@ -850,42 +1930,33 @@ def build_ui(ctx):
             _drag_info["win"] = None
 
         if _highlighted_slot:
-            try:
-                _highlighted_slot["widget"].configure(highlightbackground=BORDER, highlightthickness=1)
-            except Exception:
-                pass
+            _restore_slot_border(_highlighted_slot)
 
         if not _drag_info["active"]:
             _drag_info["file"] = None
             return
 
-        # 查找目标投掷槽位
         target = _highlighted_slot
         _highlighted_slot = None
         _drag_info["active"] = False
-
-        if not target:
-            # 盲区丢弃，不做任何修改
-            _drag_info["file"] = None
-            return
-
         src_type = _drag_info["type"]
         src_file = _drag_info["file"]
         src_cid = _drag_info["cid"]
         src_uid = _drag_info["uid"]
+        _drag_info["file"] = None
+
+        if not target:
+            return
+
         tgt_type = target["type"]
         tgt_cid = target["cid"]
 
-        _drag_info["file"] = None
-
-        # 1. 丢入「待分配托盘」 -> 拔出卡片回托盘
+        # 1. 放回未配对暂存坞
         if tgt_type == "tray":
             if src_cid is not None:
                 card = _task_store.get(src_cid)
                 if card:
                     card[src_type] = None
-                    # 加入待分配托盘
-                    nonlocal _uid_counter
                     _uid_counter += 1
                     u = f"u_{_uid_counter}"
                     _unpaired_pool[u] = {
@@ -899,28 +1970,22 @@ def build_ui(ctx):
             _render_all_cards()
             return
 
-        # 2. 丢入新建任务槽位 -> 自动创建新任务卡片并消耗素材
+        # 2. 放入新建轨道区
         if tgt_type == "new_card":
-            nonlocal _card_id_counter
             _card_id_counter += 1
             cid = f"card_{_card_id_counter}"
-            is_src_audio = src_type in ("audio", "audio_b")
+            is_src_aud = src_type in ("audio", "audio_b")
             raw_stem = os.path.splitext(os.path.basename(src_file))[0]
             clean_name = raw_stem
-            if is_src_audio and hasattr(ctx, "_extract_perspective_tag"):
+            if is_src_aud and hasattr(ctx, "_extract_perspective_tag"):
                 base_k, _, _ = ctx._extract_perspective_tag(raw_stem)
                 if base_k:
                     clean_name = base_k
-
             _task_store[cid] = {
-                "cid": cid,
-                "iid": cid,
-                "name": clean_name,
-                "script": src_file if not is_src_audio else None,
-                "audio": src_file if is_src_audio else None,
-                "audio_b": None,
-                "status": "pending",
-                "confidence": 100,
+                "cid": cid, "iid": cid, "name": clean_name,
+                "script": None if is_src_aud else src_file,
+                "audio": src_file if is_src_aud else None,
+                "audio_b": None, "status": "pending", "confidence": 100,
             }
             if src_cid is not None:
                 src_card = _task_store.get(src_cid)
@@ -930,27 +1995,17 @@ def build_ui(ctx):
                         _task_store.pop(src_cid, None)
             else:
                 _unpaired_pool.pop(src_uid, None)
-
             _render_all_cards()
-            _update_queue_meta()
             return
 
-        # 3. 丢入卡片插槽
-        # 验证文件类型兼容性（台本进台本槽，音频进音频槽）
-        is_src_audio = src_type in ("audio", "audio_b")
-        is_tgt_audio = tgt_type in ("audio", "audio_b")
-        if (src_type == "script" and tgt_type != "script") or (is_src_audio and not is_tgt_audio):
-            # 类型不兼容，拒绝换位
+        # 3. 放入轨道槽位（填入或互换）
+        if not _is_slot_compatible(src_type, tgt_type):
             return
-
         tgt_card = _task_store.get(tgt_cid)
         if not tgt_card:
             return
-
-        old_tgt_file = tgt_card.get(tgt_type)
-
-        # 目标为空插槽 -> 填入
-        if not old_tgt_file:
+        old_tgt = tgt_card.get(tgt_type)
+        if not old_tgt:
             tgt_card[tgt_type] = src_file
             if src_cid is not None:
                 src_card = _task_store.get(src_cid)
@@ -960,100 +2015,107 @@ def build_ui(ctx):
                         _task_store.pop(src_cid, None)
             else:
                 _unpaired_pool.pop(src_uid, None)
-        # 目标已有文件 -> 互换位置 (Swap)
         else:
             if src_cid is not None:
                 src_card = _task_store.get(src_cid)
                 if src_card:
-                    src_card[src_type] = old_tgt_file
+                    src_card[src_type] = old_tgt
                     tgt_card[tgt_type] = src_file
             else:
                 tgt_card[tgt_type] = src_file
-                _unpaired_pool[src_uid]["file"] = old_tgt_file
-                _unpaired_pool[src_uid]["name"] = os.path.basename(old_tgt_file)
+                _unpaired_pool[src_uid]["file"] = old_tgt
+                _unpaired_pool[src_uid]["name"] = os.path.basename(old_tgt)
 
-        # 人工干预后清空模糊标记
         tgt_card["confidence"] = 100
         if src_cid and src_cid in _task_store:
             _task_store[src_cid]["confidence"] = 100
-
         _render_all_cards()
-        _update_queue_meta()
 
-    # ── 文件导入与自动初筛配对 ──────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    #  文件导入、自动配对、菜单与外部 DND
+    # ══════════════════════════════════════════════════════════════════════
 
     def _add_files_to_list(files):
         if not files:
             return
         nonlocal _card_id_counter, _uid_counter
-
-        # 1. 汇集已有素材池文件 + 未配满已有卡片文件 + 新拖入的所有文件进行联合匹配
         pool_files = [item["file"] for item in _unpaired_pool.values()]
         incomplete_files = []
         for t in _task_store.values():
             if not t.get("script") or not t.get("audio") or (mode_var.get() == "multi_persp" and not t.get("audio_b")):
-                if t.get("script"):
-                    incomplete_files.append(t["script"])
-                if t.get("audio"):
-                    incomplete_files.append(t["audio"])
-                if t.get("audio_b"):
-                    incomplete_files.append(t["audio_b"])
+                for k in ("script", "audio", "audio_b"):
+                    if t.get(k):
+                        incomplete_files.append(t[k])
 
         new_files = [os.path.abspath(f) for f in files if f and str(f).strip()]
         all_candidates = list(dict.fromkeys(pool_files + incomplete_files + new_files))
-
         pairs, unmatched = ctx.auto_pair_files(all_candidates, mode=mode_var.get())
         added = 0
 
-        existing_auds = {p.get("audio") for p in _task_store.values()} | {p.get("audio_b") for p in _task_store.values()}
-        existing_txts = {p.get("script") for p in _task_store.values()}
+        existing_auds = {p.get("audio") for p in _task_store.values() if p.get("audio")} | {
+            p.get("audio_b") for p in _task_store.values() if p.get("audio_b")
+        }
+        existing_txts = {p.get("script") for p in _task_store.values() if p.get("script")}
 
-        # 2. 检查是否有卡片缺少 audio_b，若本次配对找出了副视角音频，自动补全已有卡片
-        if mode_var.get() == "multi_persp":
-            for pair in list(pairs):
-                # 寻找台本相同且目前缺少 audio_b 的已有任务卡片
-                matched_exist = None
-                for cid, task in _task_store.items():
-                    if task.get("script") == pair.get("script"):
-                        matched_exist = task
-                        break
-                if matched_exist:
-                    # 补齐 audio 或 audio_b
-                    if not matched_exist.get("audio") and pair.get("audio"):
-                        matched_exist["audio"] = pair["audio"]
-                        existing_auds.add(pair["audio"])
-                        added += 1
-                    if not matched_exist.get("audio_b") and pair.get("audio_b"):
-                        matched_exist["audio_b"] = pair["audio_b"]
-                        existing_auds.add(pair["audio_b"])
-                        added += 1
-                    pairs.remove(pair)
+        def _is_incomplete(card: dict) -> bool:
+            if not card.get("script") or not card.get("audio"):
+                return True
+            if mode_var.get() == "multi_persp" and not card.get("audio_b"):
+                return True
+            return False
 
-        # 3. 录入全新配对成功的任务卡片
+        # 若新配对覆盖了已有残缺轨道的台本或音频，原地补齐（并合并/清理冗余残缺项），杜绝幽灵重复轨道
+        for pair in list(pairs):
+            p_s = pair.get("script")
+            p_a = pair.get("audio")
+            p_b = pair.get("audio_b")
+            hits = [
+                cid for cid, t in list(_task_store.items())
+                if _is_incomplete(t) and (
+                    (p_s and t.get("script") == p_s)
+                    or (p_a and t.get("audio") == p_a)
+                    or (p_b and t.get("audio_b") == p_b)
+                )
+            ]
+            if not hits:
+                continue
+            primary = _task_store[hits[0]]
+            changed_card = False
+            for slot_k, val in (("script", p_s), ("audio", p_a), ("audio_b", p_b)):
+                if val and not primary.get(slot_k):
+                    primary[slot_k] = val
+                    changed_card = True
+            if pair.get("name") and not primary.get("name"):
+                primary["name"] = pair["name"]
+            if changed_card:
+                primary["confidence"] = pair.get("confidence", primary.get("confidence", 100))
+                added += 1
+            for dup_cid in hits[1:]:
+                _task_store.pop(dup_cid, None)
+            if p_s:
+                existing_txts.add(p_s)
+            if p_a:
+                existing_auds.add(p_a)
+            if p_b:
+                existing_auds.add(p_b)
+            pairs.remove(pair)
+
         for pair in pairs:
             if pair.get("audio") in existing_auds and pair.get("script") in existing_txts:
                 continue
             _card_id_counter += 1
             cid = f"card_{_card_id_counter}"
             _task_store[cid] = {
-                "cid": cid,
-                "iid": cid,
-                "name": pair["name"],
-                "script": pair.get("script"),
-                "audio": pair.get("audio"),
-                "audio_b": pair.get("audio_b"),
-                "status": "pending",
+                "cid": cid, "iid": cid, "name": pair["name"],
+                "script": pair.get("script"), "audio": pair.get("audio"),
+                "audio_b": pair.get("audio_b"), "status": "pending",
                 "confidence": pair.get("confidence", 100),
             }
-            if pair.get("audio"):
-                existing_auds.add(pair["audio"])
-            if pair.get("audio_b"):
-                existing_auds.add(pair["audio_b"])
-            if pair.get("script"):
-                existing_txts.add(pair["script"])
+            for k, s_set in (("audio", existing_auds), ("audio_b", existing_auds), ("script", existing_txts)):
+                if pair.get(k):
+                    s_set.add(pair[k])
             added += 1
 
-        # 4. 重新同步未配对素材池：清空旧池，只保留本次仍未配对的文件
         _unpaired_pool.clear()
         for item in unmatched:
             f_path = item["file"]
@@ -1063,25 +2125,26 @@ def build_ui(ctx):
             _uid_counter += 1
             uid = f"u_{_uid_counter}"
             _unpaired_pool[uid] = {
-                "uid": uid,
-                "type": "script" if is_txt else "audio",
-                "file": f_path,
-                "name": item["name"],
+                "uid": uid, "type": "script" if is_txt else "audio",
+                "file": f_path, "name": item["name"],
             }
 
         _render_all_cards()
         if added:
+            _set_led(ACCENT_HOVER)
             update_status(tr("status_added_files", added=added, total=len(_task_store)))
         else:
             update_status(tr("status_files_already"))
 
     def _auto_assemble_from_tray():
-        if not _unpaired_pool:
+        if ctx.is_running():
             return
-        files = [item["file"] for item in list(_unpaired_pool.values())]
-        _add_files_to_list(files)
+        if _unpaired_pool:
+            _add_files_to_list([item["file"] for item in list(_unpaired_pool.values())])
 
     def _browse_files(_event=None):
+        if ctx.is_running():
+            return
         files = filedialog.askopenfilenames(
             title=tr("dlg_select_files_title"),
             filetypes=[(tr("dlg_filter_supported"), "*.txt;*.wav;*.mp3;*.flac;*.m4a;*.ogg;*.aac;*.opus;*.wma"),
@@ -1089,46 +2152,47 @@ def build_ui(ctx):
         if files:
             _add_files_to_list(list(files))
 
-    for widget in (drop_frame, drop_inner, drop_label, drop_icon):
-        widget.bind("<Button-1>", _browse_files)
-    add_btn.configure(command=_browse_files)
-
-    if ctx.has_dnd:
-        def _on_external_drop(event):
-            paths = []
-            try:
-                for item in root.tk.splitlist(event.data):
-                    path = str(item).strip().strip('"').strip("'")
-                    if path:
-                        paths.append(os.path.abspath(path))
-            except Exception:
-                paths = [os.path.abspath(p) for p in event.data.split() if p.strip()]
-            _add_files_to_list(paths)
-
-        for widget in (drop_frame, drop_inner, drop_label, drop_icon, cards_wrapper, canvas):
-            widget.drop_target_register(ctx.dnd_files)
-            widget.dnd_bind("<<Drop>>", _on_external_drop)
-
     def _clear_tasks():
         if ctx.is_running():
             return
         _task_store.clear()
         _unpaired_pool.clear()
         _render_all_cards()
-        _update_queue_meta()
-        progress.configure(value=0)
+        progress_gauge.set_value(0)
         progress_pct_var.set("0%")
+        _set_led(TEXT_MUTED)
         update_status(tr("status_queue_cleared"))
+
+    add_btn.configure(command=_browse_files)
     clear_btn.configure(command=_clear_tasks)
+    dock_pair_btn.configure(command=_auto_assemble_from_tray)
 
-    # ── 右键上下文菜单与双击操作 ──────────────────────────────────────
+    def _on_external_drop(event):
+        if ctx.is_running():
+            return
+        paths = []
+        try:
+            for item in root.tk.splitlist(event.data):
+                path = str(item).strip().strip('"').strip("'")
+                if path:
+                    paths.append(os.path.abspath(path))
+        except Exception:
+            paths = [os.path.abspath(p) for p in event.data.split() if p.strip()]
+        _add_files_to_list(paths)
 
-    def _show_card_context_menu(event, cid):
+    _bind_drop_targets(stage, matrix_outer, matrix_scroll_wrap, matrix_canvas,
+                       matrix_inner, dock_frame, dock_content, dock_items)
+
+    def _show_card_context_menu(event, cid: str):
         item = _task_store.get(cid)
         if not item:
             return
-        menu = tk.Menu(root, tearoff=0, bg=PANEL, fg=TEXT,
-                       activebackground=SURFACE_ACTIVE, activeforeground=PINK, font=(FONT, 9))
+        running = ctx.is_running()
+        mut_state = tk.DISABLED if running else tk.NORMAL
+        menu = tk.Menu(root, tearoff=0, bg=BG_PANEL, fg=TEXT_PRI,
+                       activebackground=ACCENT_DIM, activeforeground=ACCENT_HOVER,
+                       disabledforeground=TEXT_MUTED,
+                       bd=1, relief=tk.SOLID, font=(FONT, 9))
 
         def _open_file(path):
             if path and os.path.exists(path):
@@ -1137,263 +2201,148 @@ def build_ui(ctx):
         def _open_folder():
             target = item.get("audio") or item.get("script")
             if target and os.path.exists(target):
-                import subprocess
                 subprocess.run(["explorer", "/select,", os.path.normpath(target)])
 
-        def _view_output(extension):
+        def _view_output(ext: str):
             audio = item.get("audio")
             if not audio:
                 return
-            output = os.path.splitext(audio)[0] + extension
-            if os.path.exists(output):
-                _open_file(output)
+            out_path = os.path.splitext(audio)[0] + ext
+            if os.path.exists(out_path):
+                _open_file(out_path)
             else:
                 messagebox.showinfo(tr("msg_no_subtitle_title"),
-                                    tr("msg_no_subtitle_text", extension=extension), parent=root)
+                                    tr("msg_no_subtitle_text", extension=ext), parent=root)
 
         def _retry_this():
+            if ctx.is_running():
+                return
             item["status"] = "pending"
             _render_all_cards()
-            update_status(tr("status_requeued", name=item['name']))
+            update_status(tr("status_requeued", name=item["name"]))
+
+        def _remove_this():
+            if ctx.is_running():
+                return
+            _task_store.pop(cid, None)
+            _render_all_cards()
 
         menu.add_command(label=tr("menu_open_folder"), command=_open_folder)
         menu.add_command(label=tr("menu_open_script"), command=lambda: _open_file(item.get("script")))
         menu.add_command(label=tr("menu_view_lrc"), command=lambda: _view_output(".lrc"))
         menu.add_command(label=tr("menu_view_srt"), command=lambda: _view_output(".srt"))
         menu.add_separator()
-        if mode_var.get() == "multi_persp":
-            def _swap_ab():
+        if _is_persp_visible():
+            def _swap():
+                if ctx.is_running():
+                    return
                 item["audio"], item["audio_b"] = item.get("audio_b"), item.get("audio")
                 _render_all_cards()
-            menu.add_command(label=tr("menu_swap_audios"), command=_swap_ab)
+            menu.add_command(label=tr("menu_swap_audios"), command=_swap, state=mut_state)
             menu.add_separator()
-        menu.add_command(label=tr("menu_retry"), command=_retry_this)
-        menu.add_command(label=tr("btn_remove_card"), command=lambda: (_task_store.pop(cid, None), _render_all_cards()))
+        menu.add_command(label=tr("menu_retry"), command=_retry_this, state=mut_state)
+        menu.add_command(label=tr("btn_remove_card"), command=_remove_this, state=mut_state)
         menu.post(event.x_root, event.y_root)
 
-    def _on_card_double_click(cid):
+    def _on_card_double_click(cid: str):
         item = _task_store.get(cid)
         if not item:
             return
         audio = item.get("audio")
         if audio:
-            for extension in (".srt", ".lrc"):
-                output = os.path.splitext(audio)[0] + extension
-                if os.path.exists(output):
-                    os.startfile(os.path.normpath(output))
+            for ext in (".srt", ".lrc"):
+                out_path = os.path.splitext(audio)[0] + ext
+                if os.path.exists(out_path):
+                    os.startfile(os.path.normpath(out_path))
                     return
         target = audio or item.get("script")
         if target and os.path.exists(target):
-            import subprocess
             subprocess.run(["explorer", "/select,", os.path.normpath(target)])
 
-    # ── 日志面板 ────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    #  模式切换与多语言全量热更新
+    # ══════════════════════════════════════════════════════════════════════
 
-    log_panel = _frame(left, BG)
-    log_panel.pack(fill=tk.X)
-    log_head = _frame(log_panel, BG)
-    log_head.pack(fill=tk.X)
-    log_toggle = _label(log_head, tr("log_panel_collapsed"), 8, MUTED, cursor="hand2")
-    log_toggle.pack(side=tk.LEFT)
-    log_clear = _button(log_head, tr("btn_clear_log"), lambda: None, compact=True)
-    log_frame = _frame(log_panel, BG, border=True)
-    log_text = tk.Text(log_frame, bg=PANEL, fg=MUTED, font=(MONO, 9), relief=tk.FLAT,
-                       wrap=tk.WORD, height=5, padx=10, pady=8, insertbackground=PINK,
-                       selectbackground=SURFACE_ACTIVE)
-    log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_text.yview)
-    log_text.configure(yscrollcommand=log_scroll.set)
-    log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-    log_visible = tk.BooleanVar(value=False)
-
-    def _toggle_log():
-        if log_visible.get():
-            log_frame.pack_forget()
-            log_clear.pack_forget()
-            log_toggle.configure(text=tr("log_panel_collapsed"))
-            log_visible.set(False)
-        else:
-            log_clear.pack(side=tk.RIGHT)
-            log_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
-            log_toggle.configure(text=tr("log_panel_expanded"))
-            log_visible.set(True)
-    log_toggle.bind("<Button-1>", lambda e: _toggle_log())
-    log_clear.configure(command=lambda: log_text.delete("1.0", tk.END))
-
-    def append_log(msg):
-        _post_ui(lambda: (log_text.insert(tk.END, msg + "\n"), log_text.see(tk.END)))
-
-    # ── 右侧运行配置面板（方案 A） ─────────────────────────────────────
-
-    settings = _frame(right, PANEL, border=True)
-    settings.pack(fill=tk.X)
-    settings_pad = _frame(settings, PANEL)
-    settings_pad.pack(fill=tk.X, padx=18, pady=16)
-    settings_title_lbl = _label(settings_pad, tr("settings_title"), 11, TEXT, True)
-    settings_title_lbl.pack(anchor="w")
-    settings_sub_lbl = _label(settings_pad, tr("settings_sub"), 8, MUTED)
-    settings_sub_lbl.pack(anchor="w", pady=(3, 16))
-
-    # 1. 界面语言选择
-    lang_field_lbl = _label(settings_pad, tr("label_lang"), 8, MUTED)
-    lang_field_lbl.pack(anchor="w", pady=(0, 6))
-    lang_combo = ttk.Combobox(settings_pad, textvariable=lang_display_var,
-                              values=[name for _, name in LANG_NAMES],
-                              state="readonly", width=25)
-    lang_combo.pack(fill=tk.X, pady=(0, 14))
-
-    # 2. 字幕驻留延长
-    extend_field_lbl = _label(settings_pad, tr("label_end_extend"), 8, MUTED)
-    extend_field_lbl.pack(anchor="w", pady=(0, 6))
-    extend_row = _frame(settings_pad, SURFACE)
-    extend_row.pack(fill=tk.X, pady=(0, 14))
-    ext_ent = tk.Entry(extend_row, textvariable=end_extend_var, font=(MONO, 10), width=7,
-                       relief=tk.FLAT, bg=SURFACE, fg=TEXT, insertbackground=PINK,
-                       highlightthickness=0, justify="left")
-    ext_ent.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=7, padx=(9, 2))
-    sec_lbl = _label(extend_row, tr("label_sec"), 9, MUTED)
-    sec_lbl.pack(side=tk.RIGHT, padx=(0, 10))
-    ext_ent.bind("<FocusOut>", lambda e: _save_settings())
-
-    # 4. Ono-Gate 拟声词剔除
-    ono_check = tk.Checkbutton(settings_pad, text=tr("check_ono_gate"), variable=ono_gate_var,
-                               font=(FONT, 9), fg=TEXT, bg=PANEL, selectcolor=SURFACE,
-                               activebackground=PANEL, activeforeground=PINK,
-                               highlightthickness=0, bd=0, anchor="w", cursor="hand2",
-                               command=_save_settings)
-    ono_check.pack(fill=tk.X, pady=(0, 12))
-
-    # 5. 高级设置
-    adv_toggle = _button(settings_pad, tr("adv_expand"), lambda: None, compact=True)
-    adv_toggle.pack(fill=tk.X, pady=(0, 10))
-    adv_panel = _frame(settings_pad, PANEL)
-    adv_show = tk.BooleanVar(value=False)
-
-    def _toggle_adv():
-        if adv_show.get():
-            adv_panel.pack_forget()
-            adv_toggle.configure(text=tr("adv_expand"))
-            adv_show.set(False)
-        else:
-            adv_panel.pack(fill=tk.X, pady=(0, 10), before=start_btn)
-            adv_toggle.configure(text=tr("adv_collapse"))
-            adv_show.set(True)
-    adv_toggle.configure(command=_toggle_adv)
-
-    dev_field_lbl = _label(adv_panel, tr("label_device"), 8, MUTED)
-    dev_field_lbl.pack(anchor="w", pady=(0, 5))
-    dev_cb = ttk.Combobox(adv_panel, textvariable=dev_var,
-                          values=["cuda", "cpu"] if ctx.cuda_ok else ["cpu"], state="readonly")
-    dev_cb.pack(fill=tk.X, pady=(0, 10))
-    dev_cb.bind("<<ComboboxSelected>>", lambda e: _save_settings())
-
-    start_btn = _button(settings_pad, tr("btn_start"), lambda: None, primary=True)
-    start_btn.pack(fill=tk.X, pady=(4, 12))
-    help_btn = _button(settings_pad, tr("btn_show_guide"), lambda: show_script_help_dialog(root), compact=True)
-    help_btn.pack(fill=tk.X)
-
-    # 执行状态面板
-    run_state = _frame(right, PANEL, border=True)
-    run_state.pack(fill=tk.X, pady=(12, 0))
-    state_pad = _frame(run_state, PANEL)
-    state_pad.pack(fill=tk.X, padx=16, pady=13)
-    state_top = _frame(state_pad, PANEL)
-    state_top.pack(fill=tk.X, pady=(0, 8))
-    state_title_lbl = _label(state_top, tr("state_title"), 8, MUTED)
-    state_title_lbl.pack(side=tk.LEFT)
-    progress_pct_var = tk.StringVar(value="0%")
-    tk.Label(state_top, textvariable=progress_pct_var, font=(MONO, 9, "bold"),
-             fg=PINK, bg=PANEL).pack(side=tk.RIGHT)
-    progress = ttk.Progressbar(state_pad, mode="determinate", maximum=100)
-    progress.pack(fill=tk.X, pady=(0, 8))
-    status_var = tk.StringVar(value=tr("status_idle"))
-    status_label = tk.Label(state_pad, textvariable=status_var, font=(FONT, 8),
-                            fg=MUTED, bg=PANEL, anchor="w", justify=tk.LEFT,
-                            wraplength=250)
-    status_label.pack(fill=tk.X)
-
-    def update_status(msg):
-        _post_ui(lambda: status_var.set(msg))
+    def _on_mode_change():
+        cur = mode_var.get()
+        _paint_mode_tiles()
+        mode_desc_var.set(tr(f"mode_{cur}_desc"))
+        _render_all_cards()
+        _save_settings()
 
     def _refresh_all_i18n():
-        """即时热切换全界面多语言文案。"""
         root.title(tr("app_title"))
-        hero_canvas.itemconfigure(hero_left_id, text=tr("banner_badge"))
-        hero_canvas.itemconfigure(hero_title_id, text=tr("banner_title"))
-        hero_canvas.itemconfigure(hero_sub_id, text=tr("banner_subtitle"))
-        hero_canvas.itemconfigure(hero_device_id, text=tr("device_cuda") if ctx.cuda_ok else tr("device_cpu"))
+        scope_header.redraw()
+        sec_engine_lbl.configure(text=_etr("rail_section_engine"))
+        sec_params_lbl.configure(text=_etr("rail_section_params"))
+        sec_sys_lbl.configure(text=_etr("rail_section_sys"))
 
-        mode_title_lbl.configure(text=tr("mode_title_label"))
-        for index, key in enumerate(("single", "multi_speaker", "multi_persp")):
-            if key in mode_buttons:
-                mode_buttons[key].configure(text=f"0{index + 1}   {tr(f'mode_{key}_title')}")
+        for k, refs in mode_tiles.items():
+            refs["title"].configure(text=tr(f"mode_{k}_title"))
+            refs["sub"].configure(text=tr(f"mode_{k}_sub"))
         mode_desc_var.set(tr(f"mode_{mode_var.get()}_desc"))
 
-        _update_drop_zone_text()
-        drop_hint_lbl.configure(text=tr("drop_hint"))
+        ext_title_lbl.configure(text=tr("label_end_extend"))
+        ext_unit_lbl.configure(text=tr("label_sec"))
+        ono_lbl.configure(text=tr("check_ono_gate"))
+        dev_lbl.configure(text=tr("label_device"))
+        help_btn.configure(text=f"?  {tr('btn_show_guide')}")
 
         queue_title_lbl.configure(text=tr("queue_title"))
+        kpi_total_k.configure(text=_etr("kpi_total"))
+        kpi_ready_k.configure(text=_etr("kpi_ready"))
+        kpi_done_k.configure(text=_etr("kpi_done"))
+        add_btn.configure(text=_etr("import_files"))
         clear_btn.configure(text=tr("btn_clear"))
-        tray_title_lbl.configure(text=tr("unpaired_tray_title"))
-        tray_hint_lbl.configure(text=tr("unpaired_tray_hint"))
+        dnd_hint_lbl.configure(text=_etr("dnd_hint"))
+
+        dock_title_lbl.configure(text=tr("unpaired_tray_title"))
+        dock_hint_lbl.configure(text=tr("unpaired_tray_hint"))
+        dock_pair_btn.configure(text=_etr("auto_pair"))
+
+        console_hdr_lbl.configure(text=_etr("console_header"))
+        log_clear_btn.configure(text=tr("btn_clear_log"))
+        _refresh_console_btn()
 
         _render_all_cards()
-
-        settings_title_lbl.configure(text=tr("settings_title"))
-        settings_sub_lbl.configure(text=tr("settings_sub"))
-        lang_field_lbl.configure(text=tr("label_lang"))
-        extend_field_lbl.configure(text=tr("label_end_extend"))
-        sec_lbl.configure(text=tr("label_sec"))
-        ono_check.configure(text=tr("check_ono_gate"))
-        adv_toggle.configure(text=tr("adv_collapse") if adv_show.get() else tr("adv_expand"))
-        dev_field_lbl.configure(text=tr("label_device"))
-        help_btn.configure(text=tr("btn_show_guide"))
-
-        log_toggle.configure(text=tr("log_panel_expanded") if log_visible.get() else tr("log_panel_collapsed"))
-        log_clear.configure(text=tr("btn_clear_log"))
-
-        state_title_lbl.configure(text=tr("state_title"))
-        if not getattr(root, "_fa_running", False) and len(_task_store) == 0:
+        if not getattr(root, "_fa_running", False) and not _task_store:
             status_var.set(tr("status_idle"))
 
-    def _on_lang_change(_event=None):
-        idx = lang_combo.current()
-        if 0 <= idx < len(LANG_NAMES):
-            code, name = LANG_NAMES[idx]
-            I18N.set_lang(code)
-            lang_var.set(code)
-            lang_display_var.set(name)
-            _refresh_all_i18n()
-            _save_settings()
-    lang_combo.bind("<<ComboboxSelected>>", _on_lang_change)
+    # ══════════════════════════════════════════════════════════════════════
+    #  对齐执行引擎回调
+    # ══════════════════════════════════════════════════════════════════════
 
-    # ── 对齐执行链路 ────────────────────────────────────────────────────
-
-    def _set_running(running):
+    def _set_running(running: bool):
         root._fa_running = running
-        pending = sum(1 for item in _task_store.values()
-                      if item.get("audio") and item.get("script") and item.get("status") != "done")
-        btn_text = tr("btn_running") if running else (
-            tr("btn_start_with_count", count=pending) if pending else tr("btn_start")
-        )
-        start_btn.configure(state=tk.DISABLED if running else tk.NORMAL,
-                            text=btn_text,
-                            bg=SURFACE if running else PINK,
-                            fg=MUTED if running else INK)
+        scope_header.set_running(running)
+        progress_gauge.set_running(running)
+        ono_switch.set_disabled(running)
+        dev_seg.set_disabled(running)
         state = tk.DISABLED if running else tk.NORMAL
-        clear_btn.configure(state=state)
         add_btn.configure(state=state)
+        clear_btn.configure(state=state)
+        dock_pair_btn.configure(state=state)
+        btn_ext_minus.configure(state=state)
+        btn_ext_plus.configure(state=state)
+        ext_entry.configure(state=state)
+        if running:
+            _set_led(ACCENT_HOVER)
+            start_btn.configure(state=tk.DISABLED, text=f"●  {tr('btn_running')}",
+                                bg=ACCENT_DIM, fg=ACCENT_HOVER)
+        else:
+            start_btn.configure(state=tk.NORMAL)
+            _update_queue_meta()
 
-    def _set_task_status(iid, status):
+    def _set_task_status(iid: str, status: str):
         def _apply():
             if iid in _task_store:
                 _task_store[iid]["status"] = status
                 _render_all_cards()
         _post_ui(_apply)
 
-    def _set_progress(value, message):
+    def _set_progress(value: float, message: str):
         def _apply():
-            progress.configure(value=value)
+            progress_gauge.set_value(value)
             progress_pct_var.set(f"{value:.0f}%")
             status_var.set(message)
         _post_ui(_apply)
@@ -1404,87 +2353,97 @@ def build_ui(ctx):
         _save_settings()
         try:
             end_extend = float(end_extend_var.get() or 0)
-            chunk = DEFAULT_VRAM_CHUNK
             if end_extend < 0:
                 raise ValueError
         except ValueError:
             messagebox.showerror(tr("msg_param_error_title"), tr("msg_param_error_text"), parent=root)
             return
+
         current = mode_var.get()
-        items = list(_task_store.values())
-        valid = [item for item in items if item.get("audio") and item.get("script")
-                 and item.get("status") != "done"]
+        valid = [t for t in _task_store.values()
+                 if t.get("audio") and t.get("script") and t.get("status") != "done"]
         if not valid:
             messagebox.showinfo(tr("msg_empty_queue_title"), tr("msg_empty_queue_text"), parent=root)
             return
+
         if current == "multi_persp":
-            missing = [item["name"] for item in valid if not item.get("audio_b")]
+            missing = [t["name"] for t in valid if not t.get("audio_b")]
             if missing:
-                missing_preview = "\n".join(missing[:8]) + ("\n…" if len(missing) > 8 else "")
+                preview = "\n".join(missing[:8]) + ("\n…" if len(missing) > 8 else "")
                 if not messagebox.askyesno(
-                        tr("msg_missing_persp_b_title"),
-                        tr("msg_missing_persp_b_text", names=missing_preview), parent=root):
+                    tr("msg_missing_persp_b_title"),
+                    tr("msg_missing_persp_b_text", names=preview), parent=root,
+                ):
                     return
 
         _set_running(True)
         _set_progress(0, tr("status_preparing", count=len(valid)))
-        append_log(f"\n开始批量处理 · {tr(f'mode_{current}_title')} · {dev_var.get().upper()}")
+        append_log(f"\n[RUN] {tr(f'mode_{current}_title')} · {dev_var.get().upper()} · {len(valid)} track(s)")
 
         def _worker():
-            succeeded = 0
-            failed = 0
+            succeeded, failed = 0, 0
             total = len(valid)
             try:
-                for index, item in enumerate(valid):
+                for idx, item in enumerate(valid):
                     iid = item["iid"]
                     _set_task_status(iid, "running")
-                    append_log(f"[{index + 1}/{total}] {item['name']}")
+                    append_log(f"[{idx + 1}/{total}] {item['name']}")
 
                     def _pct(percent, message):
-                        overall = (index * 100 + percent) / total
-                        _set_progress(overall, tr("status_progress_step", current=index + 1, total=total, message=message))
+                        overall = (idx * 100 + percent) / total
+                        _set_progress(overall, tr("status_progress_step",
+                                                  current=idx + 1, total=total, message=message))
 
                     ok, _output, error = ctx.run_pipeline(
                         script_path=item["script"], audio_path=item["audio"],
                         lora_path=ctx.lora_path, log_callback=append_log, progress_callback=_pct,
-                        dev=dev_var.get(), vram_chunk=chunk, persist_gpu=True,
+                        dev=dev_var.get(), vram_chunk=DEFAULT_VRAM_CHUNK, persist_gpu=True,
                         line_end_extend=end_extend, enable_silence_snap=True,
                         enable_resegment=True, enable_ono_gate=bool(ono_gate_var.get()),
                         enable_multi_order=current in ("multi_speaker", "multi_persp"),
-                        audio_path_b=item.get("audio_b") if current == "multi_persp" else None)
+                        audio_path_b=item.get("audio_b") if current == "multi_persp" else None,
+                    )
                     _set_task_status(iid, "done" if ok else "failed")
                     if ok:
                         succeeded += 1
                     else:
                         failed += 1
                         append_log(f"处理失败：{error}")
+                _post_ui(lambda: _set_led(EMERALD if failed == 0 else AMBER))
                 _set_progress(100, tr("status_all_done", succeeded=succeeded, failed=failed))
-                append_log(f"批量任务完成：成功 {succeeded}，失败 {failed}")
-            except Exception as error:
+                append_log(f"✓ 批量任务完成：成功 {succeeded}，失败 {failed}")
+            except Exception as err:
                 failed += 1
-                append_log(f"任务中断：{type(error).__name__}: {error}")
-                _set_progress(0, tr("status_interrupted", error=error))
+                _post_ui(lambda: _set_led(CRIMSON))
+                append_log(f"任务中断：{type(err).__name__}: {err}")
+                _set_progress(0, tr("status_interrupted", error=err))
             finally:
                 try:
                     ctx.release_gpu()
                 finally:
                     _post_ui(lambda: _set_running(False))
+
         ctx.start_worker(_worker)
+
     root._fa_set_running = _set_running
     start_btn.configure(command=_run_all)
 
     def _on_close():
         nonlocal closing
         closing = True
+        scope_header.stop()
+        progress_gauge.stop()
         _save_settings()
         root.destroy()
+
     root.protocol("WM_DELETE_WINDOW", _on_close)
 
+    # ── 初始化渲染与居中定位 ──────────────────────────────────────────
     _on_mode_change()
-    _render_all_cards()
     _refresh_all_i18n()
     root.update_idletasks()
-    width, height = root.winfo_width(), root.winfo_height()
-    root.geometry(f"+{max(0, (root.winfo_screenwidth() - width) // 2)}"
-                  f"+{max(0, (root.winfo_screenheight() - height) // 2)}")
+    _apply_dark_titlebar(root)
+    w, h = root.winfo_width(), root.winfo_height()
+    root.geometry(f"+{max(0, (root.winfo_screenwidth() - w) // 2)}"
+                  f"+{max(0, (root.winfo_screenheight() - h) // 2)}")
     return root

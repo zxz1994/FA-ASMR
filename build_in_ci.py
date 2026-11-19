@@ -209,8 +209,8 @@ def main(variant: str):
             dst_f = dst_dir / f
             shutil.copyfile(src_f, dst_f)
 
-    # 7. 复制配置与 LoRA
-    for cfg in ("fa_asmr_settings.json", "advanced_config.json"):
+    # 7. 复制配置、Agent 操作指南与 LoRA
+    for cfg in ("fa_asmr_settings.json", "advanced_config.json", "AGENTS.md"):
         if (HERE / cfg).is_file():
             shutil.copy2(HERE / cfg, final_dir / cfg)
 
@@ -298,11 +298,11 @@ start "" "{app_name}.exe"
 
     # 10. 压缩为发布资产
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    version_tag = os.environ.get("GITHUB_REF_NAME", "v2.1.0")
+    version_tag = os.environ.get("GITHUB_REF_NAME", "v2.4.0")
     if version_tag.startswith("refs/tags/"):
         version_tag = version_tag.split("/")[-1]
     if not version_tag or version_tag == "main":
-        version_tag = "v2.1.0"
+        version_tag = "v2.4.0"
     pkg_name = f"FA-ASMR-{version_tag}-Windows-{variant.upper()}"
     log(f"正在进行 7-Zip 压缩: {pkg_name} ...")
     t0 = time.time()

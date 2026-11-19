@@ -3726,21 +3726,25 @@ def build_independent_multispeaker_srt(
             if line_end_extend > 0:
                 eff_en += line_end_extend
 
-            # 2. 角色内部下一句截断（绝对不被其他并发角色截断）
+            # 2. 角色内部下一句截断（绝对不被其他并发角色截断；间隔 <= 50ms 时避免产生 eff_en < st 倒挂时间轴）
             if idx + 1 < len(spk_lines):
                 next_st_same_spk = spk_lines[idx + 1]["st_sec"]
                 if next_st_same_spk > st:
-                    eff_en = min(eff_en, next_st_same_spk - 0.05)
+                    gap_cap = next_st_same_spk - 0.05 if (next_st_same_spk - st) > 0.05 else max(next_st_same_spk, st + 0.02)
+                    eff_en = min(eff_en, gap_cap)
                 else:
                     eff_en = max(eff_en, st + 0.5)
 
             # 3. 最短驻留时长保护（1.0s），防止极短词或尾音一闪而过
             if eff_en < st + 1.0:
                 if idx + 1 < len(spk_lines) and spk_lines[idx + 1]["st_sec"] > st:
-                    eff_en = min(st + 1.0, spk_lines[idx + 1]["st_sec"] - 0.05)
+                    next_st_same_spk = spk_lines[idx + 1]["st_sec"]
+                    gap_cap = next_st_same_spk - 0.05 if (next_st_same_spk - st) > 0.05 else max(next_st_same_spk, st + 0.02)
+                    eff_en = min(st + 1.0, gap_cap)
                 else:
                     eff_en = st + 1.0
 
+            eff_en = max(eff_en, st + 0.02)
             all_cues.append((st, eff_en, ln["text"]))
 
     # 全局汇流：按起音时间严格升序排序
