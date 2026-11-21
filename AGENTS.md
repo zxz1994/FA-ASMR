@@ -152,6 +152,10 @@ python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt 
 
 读取 `audit_batch.json` 后，Agent **必须先聚焦各轨顶层的 `priority_review` 列表，实际调用多模态音频读取工具（如 `read_file` 听审对应 `clip_wav` / `separated_wavs`）**完成定向复核（严禁跳过听审仅凭文本猜测）：
 
+> **无原生音频模态的 Agent 降级指引（如 Claude Code / Codex / Cursor 等）**：
+> - 前置清洗、注音词表审校、对齐体检与后置翻译均不依赖音频模态，可 100% 正常执行；
+> - 到本步骤时，若当前模型/客户端不支持直接读取 `.wav` 音频，**切勿凭文本盲猜删改**——请直接把 `priority_review` 对应的少量短 WAV 路径与上下文列给用户人工听审确认（通常仅 3~8 段各 3~5 秒），或仅对这些局部切片调用本地 ASR 辅助核验后再由 Agent 执行修改与 `--only` 重跑。
+
 1. **`unaligned_speech_gaps`（台本缺句 / 声优即兴加词）**：
    - 直接听审 `clip_wav`（若触发分离则听 `separated_wavs`），将缺失台词补回台本；
 2. **`skipped_semantic` / `compressed` 且极低分（台本删戏未录句）**：

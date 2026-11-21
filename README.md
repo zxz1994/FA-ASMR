@@ -90,7 +90,7 @@ pip install --no-deps yomikata
 Agent 会自动按 [AGENTS.md](AGENTS.md) 执行精简闭环（严格遵循**先定稿日轴、再开翻中文**，杜绝返工）：
 1. **前置台本提取与清洗**：解析竖排 / 分栏 / 颜色分角色 PDF，剥除动作与 SE 提示，统一 `〖角色名〗` 标注；
 2. **批量分级注音审校**：执行 `--batch --export-ruby` 一次加载模型导出整部作品去重词表（按局部搭配去重、高危多音字/单字接辞切碎/角色名置顶），仅对确有错读的词写入 `ruby_fixes.json`（无需改动原台本）；
-3. **对齐 + 分级声学体检 + 多模态定向听审**：运行 `--batch --audit-separate` 生成日轴与 `priority_review` 高危审听切片（单人轨自动跳过空间拆轨，多人轨真叠声自动拆出左/中/右干声）；Agent 仅针对高危缺句、删戏未录句与多人短词跨区前吸（`isolated_speaker_jump`）实听 WAV 纠错，并用 `--only` 局部重跑定稿日轴；
+3. **对齐 + 分级声学体检 + 多模态定向听审**：运行 `--batch --audit-separate` 生成日轴与 `priority_review` 高危审听切片（单人轨自动跳过空间拆轨，多人轨真叠声自动拆出左/中/右干声）；支持原生音频的 Agent（如 Antigravity / Gemini 系）直接听审高危 WAV 纠错并用 `--only` 局部重跑定稿日轴；**若使用不支持原生读音频的 Agent（如 Claude Code / Codex / Cursor）**，则由 Agent 列出这几段短 WAV 交由用户快速听审确认或辅助局部 ASR 后再继续，其余环节均不受影响；
 4. **背景调研与紧凑格式精翻**：根据 RJ 编号查清作品设定与角色口吻，通过 `tools/compact_subs.py` 剥离时间戳导出 `行号|角色|原文`（省约 35%–40% 翻译输入 Token），译完自动回填生成 `.srt` + `.lrc` 并校验 1:1 时间轴一致性与 0 假名残留。
 
 ### 3.2 `fa_asmr_cli.py` 与配套工具常用命令
