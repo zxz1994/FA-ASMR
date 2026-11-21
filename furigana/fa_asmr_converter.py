@@ -17,9 +17,12 @@ import sys
 import os
 import glob
 import json
+import logging
 import contextlib
 import unicodedata
 from collections import defaultdict, deque
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -193,6 +196,7 @@ class RubyAnnotator:
         self.verbose = verbose
         self.strip_inline_readings = strip_inline_readings
         self._tagger = None
+        self.fugashi_error = None
         self._pykakasi = None
         self._yomikata = None          # 懒加载 yomikata dBert
         self._yomikata_loaded = False
@@ -202,16 +206,25 @@ class RubyAnnotator:
     # ── 初始化 ──────────────────────────────────
 
     def _init_fugashi(self) -> None:
-        """尝试加载 fugashi, 失败则标记为 None"""
+        """尝试加载 fugashi, 失败则标记为 None 并显式告警。"""
         try:
             import fugashi
             self._tagger = fugashi.Tagger()
+            self.fugashi_error = None
             if self.verbose:
-                print("[RubyAnnotator] 主引擎: fugashi + UniDic")
-        except Exception:
+                print("[RubyAnnotator] 主引擎: fugashi + UniDic", file=sys.stderr)
+        except Exception as e:
             self._tagger = None
-            if self.verbose:
-                print("[RubyAnnotator] fugashi 未安装, 回退到 pykakasi")
+            self.fugashi_error = f"{type(e).__name__}: {e}"
+            msg = (
+                f"[RubyAnnotator] ⚠ fugashi/UniDic 初始化失败 ({self.fugashi_error})，"
+                "已降级为 pykakasi 逐字注音（注音精度将下降）"
+            )
+            logger.warning(msg)
+            try:
+                print(msg, file=sys.stderr)
+            except Exception:
+                pass
         self._ensure_pykakasi()
 
     def _ensure_pykakasi(self) -> None:
@@ -221,9 +234,8 @@ class RubyAnnotator:
         try:
             import pykakasi
             self._pykakasi = pykakasi.kakasi()
-        except ImportError:
-            print("【错误】pykakasi 未安装。请运行: pip install pykakasi")
-            sys.exit(1)
+        except ImportError as e:
+            raise RuntimeError("pykakasi 未安装，无法执行日文注音。请运行: pip install pykakasi") from e
 
     @property
     def has_fugashi(self) -> bool:
@@ -344,19 +356,33 @@ class RubyAnnotator:
             "搾": "しぼ",
         }
         phrases = {}
+        load_warning = None
         if os.path.isfile(json_path):
             try:
                 with open(json_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if "words" in data and isinstance(data["words"], dict):
-                    words.update(data["words"])
-                if "phrases" in data and isinstance(data["phrases"], dict):
-                    phrases.update(data["phrases"])
+                if not isinstance(data, dict):
+                    raise ValueError(f"overrides.json 根节点必须为 JSON 对象，实际为 {type(data).__name__}")
+                if "words" in data:
+                    if isinstance(data["words"], dict):
+                        words.update(data["words"])
+                    else:
+                        raise ValueError("overrides.json 的 words 字段必须为对象")
+                if "phrases" in data:
+                    if isinstance(data["phrases"], dict):
+                        phrases.update(data["phrases"])
+                    else:
+                        raise ValueError("overrides.json 的 phrases 字段必须为对象")
             except Exception as e:
-                print(f"[RubyAnnotator] 读取 overrides.json 失败: {e}")
-        return words, phrases
+                load_warning = f"[RubyAnnotator] ⚠ 读取 overrides.json ({json_path}) 失败: {type(e).__name__}: {e}"
+                logger.warning(load_warning)
+                try:
+                    print(load_warning, file=sys.stderr)
+                except Exception:
+                    pass
+        return words, phrases, load_warning
 
-    _VERIFIED_OVERRIDES, _VERIFIED_PHRASE_OVERRIDES = _load_overrides()
+    _VERIFIED_OVERRIDES, _VERIFIED_PHRASE_OVERRIDES, _OVERRIDES_WARNING = _load_overrides()
 
     # ── 代词默认读法覆盖 (词级, 安全不误伤复合词) ──
     _PRONOUN_OVERRIDES = {
@@ -604,23 +630,24 @@ class RubyAnnotator:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[RubyAnnotator] 释放 CUDA 缓存失败: %s: %s", type(e).__name__, e)
 
     def _get_heteronyms(self):
         """懒加载 yomikata 自带异读词表 (surface 集合), 仅用于是否调用模型的快速判断。"""
         if self._heteronyms is None:
-            self._heteronyms = set()
             try:
                 import json
                 import yomikata
                 p = os.path.join(os.path.dirname(yomikata.__file__), 'config', 'heteronyms.json')
                 with open(p, encoding='utf-8') as f:
-                    self._heteronyms = set(json.load(f).keys())
+                    loaded = set(json.load(f).keys())
             except Exception as e:
+                # 失败时不污染 self._heteronyms，确保后续调用不会静默跳过 dBert
                 raise RuntimeError(
                     "无法加载 yomikata 异读词表；为避免静默跳过 dBert，已终止注音"
                 ) from e
+            self._heteronyms = loaded
         return self._heteronyms
 
     @staticmethod
@@ -878,8 +905,8 @@ class RubyAnnotator:
                 return lform
             if kana:
                 return kana
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[RubyAnnotator] 提取 fugashi feature 属性失败 (%r): %s: %s", getattr(word, 'surface', ''), type(e).__name__, e)
 
         # 回退: 按索引提取 (兼容旧格式)
         #   str(word.feature) 是 UnidicFeatures29 的 repr, 未取到的字段渲染为
@@ -895,54 +922,26 @@ class RubyAnnotator:
                 if not val or val == '*' or val == 'None':
                     continue
                 return val
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[RubyAnnotator] 按索引回退提取 fugashi 读音失败 (%r): %s: %s", getattr(word, 'surface', ''), type(e).__name__, e)
 
         return None
 
     # ── UniDic 读音修正表 ────────────────────────
-    # 背景: UniDic 对同一表记在不同句子里会给出不一致的读音 (词格判定不稳定)。
-    #   实测例: 「舌」单独→シタ, 「舌、」→ゼツ; 「耳」单独→ジ, 「耳、」→ミミ。
-    #   这类错误无法靠引擎自洽修复 (pron/kana/lForm/pronBase 四个字段都不稳定),
-    #   故在此维护一张「已验证正确读音」表。
-    #
-    # 数据来源: 4 套独立词典 (UniDic / OpenJTalk-NAIST / IPAdic / Sudachi / pykakasi)
-    #   交叉比对 + 语料人工复核。分歧词共 326 个, 此处收录已确认的高频项。
-    #
-    # 生效范围: 仅当 fugashi 分词结果的 surface 与表中键**完全相等**时替换读音。
-    #   复合词 (如 舌先/耳穴/身体中) 的 surface 不等于单字键, 天然不受影响。
-    #   → 不会出现 overrides「words」那种字符串替换破坏复合词的问题。
+    # 仅保留真正需要硬性纠错的单义词 / ASMR 常见身体与高频专有词，
+    # 严禁收录上下文多音字（如 中/出/来/力/日/年/他/分/何/方/君/者/間/空/一/本/発/生/腹 等），
+    # 避免无条件覆盖 UniDic + yomikata 基于上下文判出的正确读音。
     _READING_FIX = {
-        # 人称/敬称
-        "兄": "あに", "様": "さま", "達": "たち", "姉": "あね", "君": "くん",
-        "者": "しゃ", "他": "た", "方": "かた",
-        # 身体
-        "身体": "からだ", "体": "からだ", "声": "こえ", "音": "おと",
-        "間": "あいだ", "時": "とき", "額": "ひたい",
-        # 动词/形容词活用
-        "続": "つづ", "出": "だ", "分": "ぶん", "注": "そそ", "着": "き",
-        "犯": "おか", "搾": "しぼ", "捨": "す", "越": "ご", "願": "ねが",
-        "動": "うご", "来": "こ", "汚": "よご", "拭": "ふ", "向": "む",
-        "待": "ま", "垂": "た", "苦": "くる", "驚": "おどろ", "空": "あ",
-        "吸い付": "すいつ", "片付": "かたづ", "美味": "おい",
-        # 名词/接尾
-        "何": "なん", "中": "ちゅー", "的": "てき", "愛": "あい", "生": "なま",
-        "一": "いっ", "本": "ぽん", "発": "ぱつ", "聖": "せー", "奏": "かなで",
-        "熱": "あつ", "明日": "あす", "祭": "さい", "国": "こく", "竿": "さお",
-        "力": "りょく", "無": "む", "係": "かかり", "骨": "こつ", "年": "ねん",
-        "日": "にち", "章": "しょー", "臭": "しゅー", "癒": "いや",
-        # 复合/熟字
+        # ASMR 常见复合/熟字与四つ仮名修正
         "人妻": "ひとづま", "金玉": "きんたま", "中出": "なかだ",
-        "十分": "じゅうぶん", "間近": "まぢか",
-        # 单字名词: UniDic 在句中出现时会误取音读 (实测: 舌、→ゼツ; 耳→ジ)
+        "間近": "まぢか", "数多": "あまた", "不足": "ふそく", "身近": "みぢか",
+        # ASMR 常见身体/单字名词: UniDic 在标点前或孤立位置常误取音读 (如 舌、→ゼツ; 耳→ジ; 鼻→ビ)
+        "身体": "からだ", "体": "からだ", "竿": "さお",
         "舌": "した", "耳": "みみ", "鏡": "かがみ", "汁": "しる",
-        "物": "もの", "風": "ふう", "鼻": "はな", "眉": "まゆ",
-        "爪": "つめ", "肌": "はだ", "髪": "かみ", "首": "くび",
-        "腕": "うで", "足": "あし", "手": "て", "目": "め",
-        "顔": "かお", "指": "ゆび", "背": "せ", "腹": "なか",
+        "鼻": "はな", "眉": "まゆ", "爪": "つめ", "肌": "はだ",
+        "髪": "かみ", "首": "くび", "腕": "うで", "足": "あし",
+        "手": "て", "目": "め", "顔": "かお", "指": "ゆび",
         "胸": "むね", "腰": "こし", "尻": "しり", "喉": "のど",
-        # 熟字训: UniDic 会误按音读拆读
-        "数多": "あまた", "不足": "ふそく", "身近": "みぢか",
     }
 
     def _apply_reading_fix(self, surface: str, reading_hira: str) -> str:
@@ -1112,33 +1111,42 @@ class RubyAnnotator:
                     return f.read()
             except (UnicodeDecodeError, UnicodeError):
                 continue
-        print(f"  [跳过] 无法识别编码: {os.path.basename(file_path)}")
+        print(f"  [错误] 无法识别文件编码: {os.path.basename(file_path)}", file=sys.stderr)
         return None
 
 
 # ── 批量入口 ──────────────────────────────────────
 
-def main() -> None:
+def main() -> int:
     import sys
-    sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
     converter = RubyAnnotator(verbose=True)
     current_dir = os.getcwd()
     txt_files = glob.glob(os.path.join(current_dir, "*.txt"))
 
     if not txt_files:
-        print("当前目录下未找到 .txt 文件。")
-        return
+        print("当前目录下未找到 .txt 文件。", file=sys.stderr)
+        return 1
 
     engine_name = "fugashi + UniDic" if converter.has_fugashi else "pykakasi (请安装 fugashi + unidic-lite)"
     print(f"引擎: {engine_name}")
     print(f"检测到 {len(txt_files)} 个 .txt 文件\n")
 
+    ok_cnt = 0
+    fail_cnt = 0
     for fp in txt_files:
-        converter.process_file(fp)
+        if converter.process_file(fp):
+            ok_cnt += 1
+        else:
+            fail_cnt += 1
 
-    print(f"\n完成! 共处理 {len(txt_files)} 个文件。")
+    print(f"\n完成! 成功 {ok_cnt} 个，失败 {fail_cnt} 个（共 {len(txt_files)} 个文件）。")
+    return 0 if fail_cnt == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

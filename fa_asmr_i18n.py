@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import locale
+import logging
 import sys
 from typing import Dict, Any, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 LANG_NAMES: List[Tuple[str, str]] = [
     ("zh", "简体中文"),
@@ -61,9 +64,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "FA-ASMR · Forced Alignment Studio",
     },
     "banner_badge": {
-        "zh": "v2.4.0",
-        "ja": "v2.4.0",
-        "en": "v2.4.0",
+        "zh": "v2.5.0",
+        "ja": "v2.5.0",
+        "en": "v2.5.0",
     },
     "banner_title": {
         "zh": "FA-ASMR",
@@ -761,6 +764,7 @@ class I18nManager:
         """获取翻译文本。若当前语言无对应键，回退到简体中文或键名本身。"""
         entry = TRANSLATIONS.get(key)
         if not entry:
+            logger.warning("i18n 缺失翻译键: %r", key)
             return key
         text = entry.get(self._current_lang)
         if text is None:
@@ -768,7 +772,8 @@ class I18nManager:
         if kwargs:
             try:
                 return text.format(**kwargs)
-            except Exception:
+            except Exception as e:
+                logger.warning("i18n 模板格式化失败 (key=%r, kwargs=%r): %s: %s", key, kwargs, type(e).__name__, e)
                 return text
         return text
 

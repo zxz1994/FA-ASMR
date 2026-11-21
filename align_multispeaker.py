@@ -530,7 +530,7 @@ def _unmasked_clause_mean_score(
 
 
 class _AudioSoloChecker:
-    """基于 16kHz 立体声按需局部 STFT (220..3600Hz) 相干性与消去残差的纯音频单声源判定器。"""
+    """基于 16kHz 立体声按需局部 STFT (180..1800Hz) 相干性、消去残差与单耳声级差(ILD)的纯音频单声源判定器。"""
 
     def __init__(
         self,
@@ -547,6 +547,7 @@ class _AudioSoloChecker:
         self.wav = wav_stereo
         self.sr = int(sr)
         self.n_samples = int(wav_stereo.shape[1])
+        self.dur_sec = float(self.n_samples) / float(self.sr)
         self.n_fft = 1024
         self.hop = 256
         self.hop_sec = float(self.hop) / float(self.sr)
@@ -566,13 +567,15 @@ class _AudioSoloChecker:
         msc_vals: List[float] = []
         step_ref = max(1, len(self._ref_spans) // 40 or 1)
         for s0, s1 in self._ref_spans[::step_ref]:
-            if s1 - s0 >= 0.45:
-                _, c_p85, m_p15 = self._window_stats(s0, s1)
-                if m_p15 is not None:
+            if s1 - s0 >= 0.40:
+                _, c_p85, m_p15, ild_p25 = self._window_stats(s0, s1)
+                # 排除单侧极强贴麦段（头影效应下 MSC 天然偏低）后再标定双耳相干基线
+                if m_p15 is not None and ild_p25 < 12.0:
                     cres_vals.append(c_p85)
                     msc_vals.append(m_p15)
-        self.base_cres = float(np.median(cres_vals)) if cres_vals else 0.10
-        self.base_msc = float(np.median(msc_vals)) if msc_vals else 0.75
+        # 取高纯净端分位（MSC P70 / cres P30），避免全程高并发轨污染基线
+        self.base_cres = min(0.16, float(np.percentile(cres_vals, 30))) if cres_vals else 0.10
+        self.base_msc = max(0.70, float(np.percentile(msc_vals, 70))) if msc_vals else 0.75
 
     def _slice_stft(self, t0: int, t1: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         half_fft = self.n_fft // 2
@@ -594,32 +597,47 @@ class _AudioSoloChecker:
             window="hann", boundary=None, padded=False,
         )
         if self._sb_mask is None:
-            self._sb_mask = (freqs >= 220.0) & (freqs <= 3600.0)
+            # 聚焦语音基频与第一/二共振峰带 (180..1800Hz)，避开高频水声/气音与头影衰减
+            self._sb_mask = (freqs >= 180.0) & (freqs <= 1800.0)
         fl_w = zl[self._sb_mask]
         fr_w = zr[self._sb_mask]
         fe_w = np.sum((np.abs(fl_w) ** 2) + (np.abs(fr_w) ** 2) + 1e-24, axis=0)
         return fl_w, fr_w, fe_w
 
-    def _window_stats(self, st_s: float, en_s: float) -> Tuple[float, float, Optional[float]]:
-        mid = 0.5 * (st_s + en_s)
-        half = max(0.60, 0.5 * (en_s - st_s) + 0.15)
-        t0 = max(0, int(round((mid - half) / self.hop_sec)))
-        t1 = min(self.t_frames, int(round((mid + half) / self.hop_sec)))
-        if t1 - t0 < 12:
-            return 1.0, 1.0, None
+    def _subwindow_metrics(
+        self, st_s: float, en_s: float
+    ) -> List[Tuple[float, float, float, float, float]]:
+        """返回句内活跃短子窗（~256ms，步进 64ms）列表: [(sub_st, sub_en, cres, msc, abs_ild_db), ...]"""
+        # 紧贴句子真实边界（最多外扩 ±0.04s，极短句仅补足到 0.24s），避免蹭进相邻声优台词
+        dur = max(0.0, en_s - st_s)
+        if dur < 0.24:
+            mid = 0.5 * (st_s + en_s)
+            w_st = max(0.0, mid - 0.12)
+            w_en = min(self.dur_sec, mid + 0.12)
+        else:
+            w_st = max(0.0, st_s - 0.04)
+            w_en = min(self.dur_sec, en_s + 0.04)
+        t0 = max(0, int(round(w_st / self.hop_sec)))
+        t1 = min(self.t_frames, int(round(w_en / self.hop_sec)))
+        if t1 - t0 < 8:
+            return []
         fl_w, fr_w, fe_w = self._slice_stft(t0, t1)
         e_floor = max(1e-24, 0.08 * float(np.percentile(fe_w, 90)))
-        cres_list: List[float] = []
-        msc_list: List[float] = []
         T_w = fl_w.shape[1]
-        for k0 in range(0, max(1, T_w - 28 + 1), 8):
-            k1 = min(T_w, k0 + 28)
-            if k1 - k0 < 10 or float(np.mean(fe_w[k0:k1])) < e_floor:
+        win_f = 16   # ~256ms，抗转头/快节奏换人
+        step_f = 4   # ~64ms 细粒度步进
+        metrics: List[Tuple[float, float, float, float, float]] = []
+        for k0 in range(0, max(1, T_w - win_f + 1), step_f):
+            k1 = min(T_w, k0 + win_f)
+            if k1 - k0 < 8 or float(np.mean(fe_w[k0:k1])) < e_floor:
                 continue
             xl, xr = fl_w[:, k0:k1], fr_w[:, k0:k1]
             rll = np.mean(np.abs(xl) ** 2, axis=1)
             rrr = np.mean(np.abs(xr) ** 2, axis=1)
             rlr = np.mean(xl * np.conj(xr), axis=1)
+            sum_l = float(np.sum(rll))
+            sum_r = float(np.sum(rrr))
+            abs_ild_db = abs(10.0 * float(np.log10(max(1e-24, sum_l) / max(1e-24, sum_r))))
             tr = rll + rrr + 1e-24
             top_f = tr >= np.percentile(tr, 40)
             msc = float(
@@ -628,26 +646,82 @@ class _AudioSoloChecker:
             )
             res_l = np.mean(np.abs(xl - (rlr / np.maximum(1e-24, rrr))[:, None] * xr) ** 2, axis=1)
             res_r = np.mean(np.abs(xr - (np.conj(rlr) / np.maximum(1e-24, rll))[:, None] * xl) ** 2, axis=1)
-            cres_list.append(
-                float(min(np.sum(res_l) / max(1e-24, np.sum(rll)), np.sum(res_r) / max(1e-24, np.sum(rrr))))
-            )
-            msc_list.append(msc)
-        if not cres_list:
-            return 1.0, 1.0, None
-        return float(np.max(cres_list)), float(np.percentile(cres_list, 85)), float(np.percentile(msc_list, 15))
+            cres = float(min(np.sum(res_l) / max(1e-24, sum_l), np.sum(res_r) / max(1e-24, sum_r)))
+            sub_st = max(st_s, (t0 + k0) * self.hop_sec)
+            sub_en = min(en_s, (t0 + k1) * self.hop_sec)
+            metrics.append((sub_st, sub_en, cres, msc, abs_ild_db))
+        return metrics
+
+    def _window_stats(self, st_s: float, en_s: float) -> Tuple[float, float, Optional[float], float]:
+        metrics = self._subwindow_metrics(st_s, en_s)
+        if not metrics:
+            return 1.0, 1.0, None, 0.0
+        cres_list = [m[2] for m in metrics]
+        msc_list = [m[3] for m in metrics]
+        ild_list = [m[4] for m in metrics]
+        return (
+            float(np.max(cres_list)),
+            float(np.percentile(cres_list, 85)),
+            float(np.percentile(msc_list, 15)),
+            float(np.percentile(ild_list, 25)),
+        )
+
+    def _is_subwindow_solo(self, cres: float, msc: float, abs_ild_db: float) -> bool:
+        # 单耳极强贴麦（头影效应：安静耳低 >= 12dB），直接判为单侧主导单声源
+        if abs_ild_db >= 12.0:
+            return True
+        return (
+            msc >= max(0.66, 0.85 * self.base_msc)
+            and cres <= max(0.22, 1.50 * self.base_cres)
+        )
 
     def is_clearly_solo(self, st_s: float, en_s: float) -> bool:
         if not self.enabled:
             return True
         self._ensure_baseline()
-        c_max, c_p85, m_p15 = self._window_stats(st_s, en_s)
+        c_max, c_p85, m_p15, ild_p25 = self._window_stats(st_s, en_s)
         if m_p15 is None:
             return False
+        # 单耳强偏置快速通道（避免贴耳低语因头影耳底噪拉低 MSC 而误判为并发）
+        if ild_p25 >= 12.0:
+            return True
         return (
             m_p15 >= max(0.66, 0.85 * self.base_msc)
             and c_p85 <= max(0.18, 1.35 * self.base_cres)
             and c_max <= max(0.28, 1.75 * self.base_cres)
         )
+
+    def split_solo_subspans(self, st_s: float, en_s: float) -> List[Tuple[float, float, bool]]:
+        """对长句做帧级单声源/并发分段，避免句尾短暂插话让整句独白失去保护。"""
+        if not self.enabled or (en_s - st_s) < 1.50:
+            return [(st_s, en_s, self.is_clearly_solo(st_s, en_s))]
+        self._ensure_baseline()
+        metrics = self._subwindow_metrics(st_s, en_s)
+        if len(metrics) < 3:
+            return [(st_s, en_s, self.is_clearly_solo(st_s, en_s))]
+        flags = [self._is_subwindow_solo(m[2], m[3], m[4]) for m in metrics]
+        if all(flags):
+            return [(st_s, en_s, True)]
+        if not any(flags):
+            return [(st_s, en_s, False)]
+        # 3 点中值平滑消除单帧毛刺
+        smooth = list(flags)
+        for i in range(1, len(flags) - 1):
+            smooth[i] = (int(flags[i - 1]) + int(flags[i]) + int(flags[i + 1])) >= 2
+        segs: List[Tuple[float, float, bool]] = []
+        cur_st, cur_en, cur_flag = metrics[0][0], metrics[0][1], smooth[0]
+        for idx in range(1, len(metrics)):
+            s0, s1 = metrics[idx][0], metrics[idx][1]
+            fl = smooth[idx]
+            if fl == cur_flag:
+                cur_en = max(cur_en, s1)
+            else:
+                if cur_en - cur_st >= 0.12:
+                    segs.append((cur_st, cur_en, cur_flag))
+                cur_st, cur_en, cur_flag = s0, s1, fl
+        if cur_en - cur_st >= 0.12:
+            segs.append((cur_st, cur_en, cur_flag))
+        return segs if segs else [(st_s, en_s, False)]
 
 
 def extract_acoustic_context(
@@ -744,7 +818,463 @@ def extract_acoustic_context(
         "blank": blank,
         "tokenizer": tokenizer,
         "_stereo_wav": stereo_wav_16k,
+        "_device": str(device),
+        "_lora_path": resolved_lora,
     }
+
+
+class _SpeakerVoiceprintJudge:
+    """零新依赖说话人声纹原型判别器：复用已缓存的 MMS-FA (wav2vec2) 第 2~4 浅层隐状态。
+
+    设计原则：
+      1. 严格按需提取（只跑各角色至多 20 条纯净独白句 + 少数争议候选句），不常驻整轨隐状态，显存/内存开销极低；
+      2. 轨内去均值中心化（消除 Transformer 共享偏置）+ 留一法自检门控（LOO < 0.72 自动关闭），
+         确保声线极近或全程强畸变轨零负优化，自动退回纯声学基线。
+    """
+
+    def __init__(
+        self,
+        acoustic_ctx: Dict[str, Any],
+        spk_chains: Dict[str, List[int]],
+        per_spk_results: Dict[str, Dict[int, List[Dict[str, Any]]]],
+        ono_clause_flags: Sequence[int],
+        is_solo_cached: Callable[[float, float], bool],
+        log: Callable[[str], None],
+        clause_speakers: Optional[Sequence[Any]] = None,
+    ) -> None:
+        self.ready = False
+        self.loo_acc = 0.0
+        self.protos: Dict[str, np.ndarray] = {}
+        self._mean_vec: Optional[np.ndarray] = None
+        self._span_cache: Dict[Tuple[float, float], Optional[Dict[str, float]]] = {}
+        self._wav = acoustic_ctx.get("_stereo_wav")
+        self._sr = 16000
+        self._w2v2 = None
+        self._device = None
+
+        if self._wav is None or self._wav.ndim != 2 or self._wav.shape[1] < self._sr:
+            return
+        active_spks = [s for s, ch in spk_chains.items() if ch]
+        if len(active_spks) < 2:
+            return
+
+        # 复用已缓存在 align_model 中的 MMS_FA 模型（0ms 重载）
+        from align_model import get_mms_model, _resolve_device
+        dev_str = acoustic_ctx.get("_device", "auto")
+        lora_p = acoustic_ctx.get("_lora_path", None)
+        self._device = _resolve_device(dev_str)
+        bundle = torchaudio.pipelines.MMS_FA
+        mms_model = get_mms_model(bundle, self._device, lora_path=lora_p)
+        self._w2v2 = mms_model.model
+
+        # 收集每个角色干净、无他方重叠的单声源独白句用于在线标定原型
+        all_spans_by_spk: Dict[str, List[Tuple[float, float, float, int]]] = {}
+        for sp in active_spks:
+            lst: List[Tuple[float, float, float, int]] = []
+            for ci in spk_chains[sp]:
+                if ci < len(ono_clause_flags) and ono_clause_flags[ci]:
+                    continue
+                if clause_speakers and ci < len(clause_speakers) and len(clause_speakers[ci]) >= 2:
+                    continue  # 排除齐声句
+                inf = _clause_summary(per_spk_results[sp].get(ci, []))
+                if inf["skipped"] or inf["dur"] < 0.70 or inf["score"] < -2.35:
+                    continue
+                lst.append((float(inf["st"]), float(inf["en"]), float(inf["score"]), ci))
+            all_spans_by_spk[sp] = lst
+
+        calib_items: List[Tuple[str, float, float]] = []
+        for sp in active_spks:
+            cands = []
+            for st_s, en_s, sc_s, _ in all_spans_by_spk[sp]:
+                # 排除与他方重叠的句子
+                ov_other = any(
+                    min(en_s, e2) - max(st_s, s2) > 0.15
+                    for osp, olst in all_spans_by_spk.items() if osp != sp
+                    for s2, e2, _, _ in olst
+                )
+                if ov_other:
+                    continue
+                solo_bonus = 1.0 if is_solo_cached(st_s, en_s) else 0.0
+                cands.append((solo_bonus, sc_s, min(4.0, en_s - st_s), st_s, en_s))
+            cands.sort(reverse=True)
+            for _, _, _, st_s, en_s in cands[:20]:
+                calib_items.append((sp, st_s, en_s))
+
+        per_spk_cnt = {sp: sum(1 for s, _, _ in calib_items if s == sp) for sp in active_spks}
+        if any(v < 2 for v in per_spk_cnt.values()):
+            return
+
+        raw_embs: List[np.ndarray] = []
+        raw_labels: List[str] = []
+        for sp, st_s, en_s in calib_items:
+            v = self._extract_raw_embedding(st_s, en_s)
+            if v is not None:
+                raw_embs.append(v)
+                raw_labels.append(sp)
+
+        final_cnt = {sp: sum(1 for s in raw_labels if s == sp) for sp in active_spks}
+        if any(v < 2 for v in final_cnt.values()):
+            return
+
+        mat = np.stack(raw_embs, axis=0)
+        mean_v = mat.mean(axis=0, keepdims=True)
+        mat_c = mat - mean_v
+        mat_c = mat_c / (np.linalg.norm(mat_c, axis=1, keepdims=True) + 1e-8)
+
+        # 留一法自检门控：仅当本轨浅层声纹真实可分（LOO >= 72%）时启用
+        n_cal = len(raw_labels)
+        ok_cnt = 0
+        for i in range(n_cal):
+            p_loo: Dict[str, np.ndarray] = {}
+            for sp in active_spks:
+                idxs = [k for k in range(n_cal) if k != i and raw_labels[k] == sp]
+                if not idxs:
+                    continue
+                pv = mat_c[idxs].mean(axis=0)
+                p_loo[sp] = pv / (np.linalg.norm(pv) + 1e-8)
+            if len(p_loo) < 2:
+                continue
+            pred = max(p_loo.keys(), key=lambda s: float(np.dot(mat_c[i], p_loo[s])))
+            if pred == raw_labels[i]:
+                ok_cnt += 1
+        self.loo_acc = ok_cnt / float(max(1, n_cal))
+        if self.loo_acc < 0.72:
+            log(f"  ℹ [浅层声纹门控] L2-L4 留一法区分率 {self.loo_acc*100:.1f}% < 72%，本轨自动关闭声纹裁决")
+            return
+
+        self._mean_vec = mean_v[0]
+        for sp in active_spks:
+            idxs = [k for k in range(n_cal) if raw_labels[k] == sp]
+            pv = mat_c[idxs].mean(axis=0)
+            self.protos[sp] = pv / (np.linalg.norm(pv) + 1e-8)
+        self.ready = True
+        log(f"  🧬 [浅层声纹原型] 已复用 MMS-FA L2-L4 特征标定 {len(active_spks)} 位说话人 (LOO={self.loo_acc*100:.1f}%, 样本={final_cnt})")
+
+    def _extract_raw_embedding(self, st_s: float, en_s: float) -> Optional[np.ndarray]:
+        if self._w2v2 is None or self._wav is None:
+            return None
+        sr = self._sr
+        n_tot = self._wav.shape[1]
+        # 限制单句最长截取 8.0s（取中心窗），防止超长独白句在小显存卡上引发自注意力显存尖峰
+        if en_s - st_s > 8.0:
+            mid_cap = 0.5 * (st_s + en_s)
+            st_s, en_s = mid_cap - 4.0, mid_cap + 4.0
+        pad = 0.12
+        a0 = max(0, int((st_s - pad) * sr))
+        a1 = min(n_tot, int((en_s + pad) * sr))
+        if a1 - a0 < int(0.30 * sr):
+            # 极短句对称扩展至 0.32s 确保 CNN 感受野完整
+            mid = 0.5 * (st_s + en_s)
+            a0 = max(0, int((mid - 0.16) * sr))
+            a1 = min(n_tot, int((mid + 0.16) * sr))
+            if a1 - a0 < int(0.24 * sr):
+                return None
+        seg = self._wav[:, a0:a1]
+        el = float(np.mean(seg[0] ** 2))
+        er = float(np.mean(seg[1] ** 2))
+        mono_np = seg[0] if el >= er else seg[1]
+        mx = float(np.max(np.abs(mono_np)))
+        if mx < 1e-5:
+            return None
+        mono_t = torch.from_numpy((mono_np / mx).astype(np.float32)).unsqueeze(0).to(self._device)
+        with torch.inference_mode(), torch.autocast(
+            device_type="cuda", dtype=torch.float16, enabled=(self._device.type == "cuda")
+        ):
+            feats, _ = self._w2v2.extract_features(mono_t, num_layers=4)
+        left_f = int(round((st_s - a0 / float(sr)) / 0.02))
+        right_f = int(round((en_s - a0 / float(sr)) / 0.02))
+        parts: List[np.ndarray] = []
+        for ly in (2, 3, 4):
+            h = feats[ly - 1][0].float()
+            T = h.shape[0]
+            f0 = max(0, min(T - 1, left_f))
+            f1 = max(f0 + 1, min(T, right_f))
+            sub = h[f0:f1]
+            mu = sub.mean(dim=0)
+            sd = sub.std(dim=0) if sub.shape[0] > 1 else torch.zeros_like(mu)
+            v = torch.cat([mu, sd], dim=0)
+            v = v / (v.norm() + 1e-8)
+            parts.append(v.cpu().numpy())
+        return np.concatenate(parts, axis=0).astype(np.float32)
+
+    def score_span(self, st_s: float, en_s: float) -> Optional[Dict[str, float]]:
+        if not self.ready or self._mean_vec is None:
+            return None
+        key = (round(st_s, 2), round(en_s, 2))
+        if key in self._span_cache:
+            return self._span_cache[key]
+        raw = self._extract_raw_embedding(st_s, en_s)
+        if raw is None:
+            self._span_cache[key] = None
+            return None
+        vc = raw - self._mean_vec
+        vc = vc / (np.linalg.norm(vc) + 1e-8)
+        scores = {sp: float(np.dot(vc, pv)) for sp, pv in self.protos.items()}
+        self._span_cache[key] = scores
+        return scores
+
+    def margin_for(self, st_s: float, en_s: float, spk: str) -> Optional[float]:
+        scs = self.score_span(st_s, en_s)
+        if not scs or spk not in scs or len(scs) < 2:
+            return None
+        own = scs[spk]
+        best_oth = max(v for k, v in scs.items() if k != spk)
+        return own - best_oth
+
+
+def _resolve_same_text_swaps(
+    spk_chains: Dict[str, List[int]],
+    per_spk_results: Dict[str, Dict[int, List[Dict[str, Any]]]],
+    alignment_tokens: List[List[str]],
+    ono_clause_flags: Sequence[int],
+    vp_judge: _SpeakerVoiceprintJudge,
+    log: Callable[[str], None],
+    clause_speakers: Optional[Sequence[Any]] = None,
+) -> int:
+    """修正台本紧邻、发音完全相同、时间紧挨却发生角色对调的回声/跟读句。"""
+    active_spks = [s for s, ch in spk_chains.items() if ch]
+    if len(active_spks) < 2:
+        return 0
+    # 构造 ci -> spk 映射（仅单人非拟声非跳过句）
+    ci_owner: Dict[int, str] = {}
+    for sp in active_spks:
+        for ci in spk_chains[sp]:
+            if ci < len(ono_clause_flags) and ono_clause_flags[ci]:
+                continue
+            if clause_speakers and ci < len(clause_speakers) and len(clause_speakers[ci]) >= 2:
+                continue
+            inf = _clause_summary(per_spk_results[sp].get(ci, []))
+            if not inf["skipped"] and inf["n"] > 0:
+                ci_owner[ci] = sp
+
+    swapped = 0
+    cis_sorted = sorted(ci_owner.keys())
+    used = set()
+    for idx_i, ci_a in enumerate(cis_sorted):
+        if ci_a in used:
+            continue
+        sp_a = ci_owner[ci_a]
+        ph_a = "".join(alignment_tokens[ci_a])
+        if len(ph_a) < 4:
+            continue
+        for ci_b in cis_sorted[idx_i + 1:]:
+            if ci_b - ci_a > 3:
+                break
+            if ci_b in used:
+                continue
+            sp_b = ci_owner[ci_b]
+            if sp_b == sp_a:
+                continue
+            if "".join(alignment_tokens[ci_b]) != ph_a:
+                continue
+            if len(alignment_tokens[ci_a]) != len(alignment_tokens[ci_b]):
+                continue
+            inf_a = _clause_summary(per_spk_results[sp_a][ci_a])
+            inf_b = _clause_summary(per_spk_results[sp_b][ci_b])
+            # 必须时间邻近 (<= 4.0s) 且与台本顺序恰好相反 (ci_a < ci_b 但 st_a > st_b + 0.15)
+            gap_ab = max(0.0, max(inf_a["st"], inf_b["st"]) - min(inf_a["en"], inf_b["en"]))
+            if gap_ab > 4.0 or inf_a["st"] <= inf_b["st"] + 0.15:
+                continue
+            # 检查声纹证据（若声纹可用，要求交换后总声纹匹配度不降反升或至少不强烈反驳）
+            if vp_judge.ready:
+                sc_a_pos = vp_judge.score_span(inf_a["st"], inf_a["en"])
+                sc_b_pos = vp_judge.score_span(inf_b["st"], inf_b["en"])
+                if sc_a_pos and sc_b_pos:
+                    vp_cur = sc_a_pos.get(sp_a, 0.0) + sc_b_pos.get(sp_b, 0.0)
+                    vp_swp = sc_b_pos.get(sp_a, 0.0) + sc_a_pos.get(sp_b, 0.0)
+                    if vp_swp < vp_cur - 0.05:
+                        continue
+            # 检查交换后不破坏各自单链单调顺序
+            def _fits_chain(sp_t: str, ci_t: int, new_st: float, new_en: float) -> bool:
+                ch = spk_chains[sp_t]
+                pos = ch.index(ci_t)
+                for p in range(pos - 1, -1, -1):
+                    pi = _clause_summary(per_spk_results[sp_t].get(ch[p], []))
+                    if not pi["skipped"] and pi["n"] > 0:
+                        if new_st < pi["en"] - 0.15:
+                            return False
+                        break
+                for p in range(pos + 1, len(ch)):
+                    ni = _clause_summary(per_spk_results[sp_t].get(ch[p], []))
+                    if not ni["skipped"] and ni["n"] > 0:
+                        if new_en > ni["st"] + 0.15:
+                            return False
+                        break
+                return True
+
+            if not (_fits_chain(sp_a, ci_a, inf_b["st"], inf_b["en"]) and _fits_chain(sp_b, ci_b, inf_a["st"], inf_a["en"])):
+                continue
+
+            res_a = per_spk_results[sp_a][ci_a]
+            res_b = per_spk_results[sp_b][ci_b]
+            if len(res_a) != len(res_b):
+                continue
+            for ra, rb in zip(res_a, res_b):
+                for key in ("original_start", "original_end", "start", "end", "score"):
+                    has_a, has_b = key in ra, key in rb
+                    if has_a and has_b:
+                        ra[key], rb[key] = rb[key], ra[key]
+                    elif has_a:
+                        rb[key] = ra.pop(key)
+                    elif has_b:
+                        ra[key] = rb.pop(key)
+            used.add(ci_a)
+            used.add(ci_b)
+            swapped += 1
+            break
+    if swapped:
+        log(f"  🔀 [同词角色裁决] 修正 {swapped} 对紧邻同词反序对调")
+    return swapped
+
+
+def _rescue_out_of_order_short_clauses(
+    spk_chains: Dict[str, List[int]],
+    per_spk_results: Dict[str, Dict[int, List[Dict[str, Any]]]],
+    alignment_tokens: List[List[str]],
+    line_group: Sequence[int],
+    ono_clause_flags: Sequence[int],
+    acoustic_ctx: Dict[str, Any],
+    base_emission_2d: torch.Tensor,
+    vp_judge: _SpeakerVoiceprintJudge,
+    log: Callable[[str], None],
+    clause_surfaces: Optional[Sequence[str]] = None,
+    clause_speakers: Optional[Sequence[Any]] = None,
+) -> int:
+    """对违背台本前后高置信他方锚点顺序的低分短句（如短回声/短接话），在未遮罩原始图上做有界窗口重对齐与严格验收。"""
+    active_spks = [s for s, ch in spk_chains.items() if ch]
+    if len(active_spks) < 2:
+        return 0
+    tokenizer = acoustic_ctx["tokenizer"]
+    tok_dict = tokenizer.dictionary
+    blank_id = int(acoustic_ctx["blank"])
+    raw_np = base_emission_2d.detach().cpu().numpy()
+    T_all = int(raw_np.shape[0])
+    n_cls = int(raw_np.shape[1])
+    valid_cls = [c for c in range(n_cls) if c != blank_id]
+
+    # 全局各 ci 的归属与摘要
+    ci_info: Dict[int, Tuple[str, Dict[str, Any]]] = {}
+    for sp in active_spks:
+        for ci in spk_chains[sp]:
+            inf = _clause_summary(per_spk_results[sp].get(ci, []))
+            if not inf["skipped"] and inf["n"] > 0:
+                ci_info[ci] = (sp, inf)
+
+    repaired = 0
+    for sp in active_spks:
+        ch = spk_chains[sp]
+        for pos, ci in enumerate(ch):
+            if ci < len(ono_clause_flags) and ono_clause_flags[ci]:
+                continue
+            if clause_speakers and ci < len(clause_speakers) and len(clause_speakers[ci]) >= 2:
+                continue
+            inf = _clause_summary(per_spk_results[sp].get(ci, []))
+            if inf["skipped"] or inf["n"] <= 0:
+                continue
+            n_phones = sum(len(t) for t in alignment_tokens[ci])
+            if n_phones > 14:
+                continue
+
+            # 找台本中紧邻前一句与后一句（属于他方角色、高置信、顺序正常且间隔 <= 12s）
+            prev_anc = ci_info.get(ci - 1)
+            next_anc = ci_info.get(ci + 1)
+            if prev_anc is None or next_anc is None:
+                continue
+            sp_prev, inf_prev = prev_anc
+            sp_next, inf_next = next_anc
+            if sp_prev == sp or sp_next == sp:
+                continue
+            if inf_prev["score"] < -2.10 or inf_next["score"] < -2.10:
+                continue
+            if inf_prev["st"] >= inf_next["en"] or (inf_next["en"] - inf_prev["st"]) > 12.0:
+                continue
+
+            # 仅当本句明显越出了台本紧邻前后锚点区间才视为候选
+            out_left = inf["en"] < inf_prev["st"] + 0.15
+            out_right = inf["st"] > inf_next["en"] - 0.15
+            if not (out_left or out_right):
+                continue
+
+            old_raw = _unmasked_clause_mean_score(per_spk_results[sp][ci], raw_np, tok_dict)
+            old_vp = vp_judge.margin_for(inf["st"], inf["en"], sp) if vp_judge.ready else None
+            # 门禁：若原落点原始 CTC 极高且声纹不反对（可能是真乱序），绝不妄动
+            if old_raw >= -1.25 and (old_vp is None or old_vp >= -0.05):
+                continue
+
+            # 结合本角色单链前后邻句，构造安全搜索窗
+            own_lo = 0.0
+            for p in range(pos - 1, -1, -1):
+                pi = _clause_summary(per_spk_results[sp].get(ch[p], []))
+                if not pi["skipped"] and pi["n"] > 0:
+                    own_lo = float(pi["en"])
+                    break
+            own_hi = float(T_all * FRAME_SEC)
+            for p in range(pos + 1, len(ch)):
+                ni = _clause_summary(per_spk_results[sp].get(ch[p], []))
+                if not ni["skipped"] and ni["n"] > 0:
+                    own_hi = float(ni["st"])
+                    break
+
+            w_lo = max(own_lo, float(inf_prev["st"]) - 0.20)
+            w_hi = min(own_hi, float(inf_next["en"]) + 0.20)
+            if w_hi - w_lo < 0.35:
+                continue
+
+            f_lo = max(0, int(np.floor(w_lo / FRAME_SEC)))
+            f_hi = min(T_all, int(np.ceil(w_hi / FRAME_SEC)))
+            if f_hi <= f_lo + 4:
+                continue
+
+            em_win = base_emission_2d.clone()
+            if f_lo > 0:
+                em_win[:f_lo, valid_cls] = -15.0
+                em_win[:f_lo, blank_id] = 0.0
+            if f_hi < T_all:
+                em_win[f_hi:, valid_cls] = -15.0
+                em_win[f_hi:, blank_id] = 0.0
+
+            realigned = _align_subset_clauses(
+                sub_indices=[ci],
+                alignment_tokens=alignment_tokens,
+                line_group=line_group,
+                ono_clause_flags=ono_clause_flags,
+                enable_silence_snap=True,
+                acoustic_ctx=acoustic_ctx,
+                custom_emission_2d=em_win,
+                enable_inter_line_filler=True,
+                enable_ono_skip=False,
+                enable_word_skip=False,
+                clause_surfaces=clause_surfaces,
+                clause_speakers=clause_speakers,
+                log_callback=None,
+            )
+            new_cl = realigned.get(ci)
+            if not new_cl:
+                continue
+            new_inf = _clause_summary(new_cl)
+            if new_inf["skipped"] or new_inf["n"] <= 0 or new_inf["dur"] > max(3.0, 0.45 * n_phones):
+                continue
+
+            new_raw = _unmasked_clause_mean_score(new_cl, raw_np, tok_dict)
+            new_vp = vp_judge.margin_for(new_inf["st"], new_inf["en"], sp) if vp_judge.ready else None
+
+            ctc_win = (new_raw >= -2.35 and new_raw >= old_raw + 0.30)
+            vp_win = (
+                vp_judge.ready
+                and new_vp is not None
+                and old_vp is not None
+                and new_raw >= -2.40
+                and new_raw >= old_raw - 0.25
+                and new_vp >= 0.08
+                and (new_vp - old_vp) >= 0.15
+            )
+            if ctc_win or vp_win:
+                per_spk_results[sp][ci] = new_cl
+                ci_info[ci] = (sp, new_inf)
+                repaired += 1
+    if repaired:
+        log(f"  🎯 [越序短句局部修复] 共校正 {repaired} 句错位短接话")
+    return repaired
 
 
 def _align_clauses_with_context(
@@ -2229,24 +2759,20 @@ def align_multispeaker_or_reordered(
     # 保护被顿号/喘息劈成两半的短实词（如「うる、さいっ」「やめ、てっ」）：
     # 前半段是非拟声极短实词(<=2字)、紧邻后缀虽<=3字却被误标 ono=1 时，合并语义判断若为非易错实词则撤销后缀的 ono 标记
     if clause_surfaces:
-        try:
-            from ono_filter import is_easy_ono as _is_easy_ono_fn
-        except Exception:
-            _is_easy_ono_fn = None
-        if _is_easy_ono_fn is not None:
-            for ci_k in range(n_clauses - 1):
-                if (
-                    ono_clause_flags[ci_k] == 0
-                    and ci_k + 1 < len(ono_clause_flags)
-                    and ono_clause_flags[ci_k + 1] == 1
-                    and ci_k + 1 < len(line_group)
-                    and line_group[ci_k] == line_group[ci_k + 1]
-                    and ci_k + 1 < len(clause_surfaces)
-                    and len(str(clause_surfaces[ci_k]).strip()) <= 2
-                    and len(str(clause_surfaces[ci_k + 1]).strip()) <= 3
-                    and not _is_easy_ono_fn(str(clause_surfaces[ci_k]) + str(clause_surfaces[ci_k + 1]))
-                ):
-                    ono_clause_flags[ci_k + 1] = 0
+        from ono_filter import is_easy_ono as _is_easy_ono_fn
+        for ci_k in range(n_clauses - 1):
+            if (
+                ono_clause_flags[ci_k] == 0
+                and ci_k + 1 < len(ono_clause_flags)
+                and ono_clause_flags[ci_k + 1] == 1
+                and ci_k + 1 < len(line_group)
+                and line_group[ci_k] == line_group[ci_k + 1]
+                and ci_k + 1 < len(clause_surfaces)
+                and len(str(clause_surfaces[ci_k]).strip()) <= 2
+                and len(str(clause_surfaces[ci_k + 1]).strip()) <= 3
+                and not _is_easy_ono_fn(str(clause_surfaces[ci_k]) + str(clause_surfaces[ci_k + 1]))
+            ):
+                ono_clause_flags[ci_k + 1] = 0
 
     distinct_speakers: List[str] = []
     for spk_tup in clause_speakers:
@@ -2286,6 +2812,16 @@ def align_multispeaker_or_reordered(
         diagnostics_out["frame_sec"] = float(FRAME_SEC)
 
     coop_emission = build_cooperative_stereo_emission(acoustic_ctx, ear_bias=0.0)
+    if isinstance(diagnostics_out, dict):
+        _c_np = coop_emission.detach().cpu().numpy()
+        _b_id = int(acoustic_ctx.get("blank", 0))
+        _ign = set(acoustic_ctx.get("ignored_classes", ()))
+        _v_cls = [c for c in range(_c_np.shape[1]) if c != _b_id and c not in _ign]
+        diagnostics_out["ctc_nb_active"] = (
+            (np.max(_c_np[:, _v_cls], axis=1) > (_c_np[:, _b_id] - np.float32(0.5)))
+            if _v_cls else np.zeros(_c_np.shape[0], dtype=bool)
+        )
+        diagnostics_out["duration_sec"] = float(_c_np.shape[0] * FRAME_SEC)
 
     # ── 情况 A：显式多说话人台本 (>= 2 个角色) ──────────────────────────
     if len(distinct_speakers) >= 2:
@@ -2346,6 +2882,11 @@ def align_multispeaker_or_reordered(
         blank_id = int(acoustic_ctx.get("blank", 0))
         ignored_set = set(acoustic_ctx.get("ignored_classes", ()))
         valid_cls_all = [c for c in range(n_classes_all) if c != blank_id and c not in ignored_set]
+        _coop_ref_np = coop_emission.detach().cpu().numpy()
+        _ctc_nb_active = (
+            np.max(_coop_ref_np[:, valid_cls_all], axis=1) > (_coop_ref_np[:, blank_id] - np.float32(0.5))
+            if valid_cls_all else np.zeros(total_frames_all, dtype=bool)
+        )
 
         def _clause_phoneme_lr_diff(ci: int, cl_res: List[Dict[str, Any]]) -> float:
             """用目标音素在左右声道的神经网络发射得分差 (em_L - em_R) 判定声道，完全不受舔耳物理分贝干扰。"""
@@ -2510,32 +3051,37 @@ def align_multispeaker_or_reordered(
                                 break
                     if beaten_by_own:
                         continue
-                    is_solo = _is_solo_cached(inf["st"], inf["en"])
-                    if is_solo:
-                        if lr_diff > 0.55:
-                            pen_l, pen_r = 1.85, 0.0
-                        elif lr_diff < -0.55:
-                            pen_l, pen_r = 0.0, 1.85
-                        else:
-                            pen_l, pen_r = 1.65, 1.65
-                    else:
+                    def _pen_for_solo(solo_flag: bool) -> Tuple[float, float]:
+                        if solo_flag:
+                            if lr_diff > 0.55:
+                                return 1.85, 0.0
+                            if lr_diff < -0.55:
+                                return 0.0, 1.85
+                            return 1.65, 1.65
                         # 真·多人同时叠声区间：仅轻度抑制单耳偏向，居中叠声完全不抹除音素发射（只抬高 filler 底线）
                         if lr_diff > 0.55:
-                            pen_l, pen_r = 1.10, 0.0
-                        elif lr_diff < -0.55:
-                            pen_l, pen_r = 0.0, 1.10
-                        else:
-                            pen_l, pen_r = 0.0, 0.0
+                            return 1.10, 0.0
+                        if lr_diff < -0.55:
+                            return 0.0, 1.10
+                        return 0.0, 0.0
 
                     if inf["score"] > -2.20 or (not is_ono and inf["n"] >= 3 and inf["score"] > -2.60):
-                        other_raw.append((inf["st"], inf["en"], pen_l, pen_r))
+                        # 长句按子窗拆分单声源段与并发段，避免局部抢话导致整句独白失去保护
+                        if inf["dur"] >= 1.50 and not _is_solo_cached(inf["st"], inf["en"]):
+                            for sub_st, sub_en, sub_solo in solo_checker.split_solo_subspans(inf["st"], inf["en"]):
+                                pl_s, pr_s = _pen_for_solo(sub_solo)
+                                other_raw.append((sub_st, sub_en, pl_s, pr_s))
+                        else:
+                            pl_s, pr_s = _pen_for_solo(_is_solo_cached(inf["st"], inf["en"]))
+                            other_raw.append((inf["st"], inf["en"], pl_s, pr_s))
                     elif not is_ono:
+                        pl_s, pr_s = _pen_for_solo(_is_solo_cached(inf["st"], inf["en"]))
                         for r in cl_res:
                             if (not r.get("skipped")
                                     and float(r.get("score", -10.0)) > -2.0
                                     and r.get("original_start") is not None
                                     and r.get("original_end") is not None):
-                                other_raw.append((float(r["original_start"]), float(r["original_end"]), pen_l, pen_r))
+                                other_raw.append((float(r["original_start"]), float(r["original_end"]), pl_s, pr_s))
                 other_raw.sort(key=lambda x: (x[0], x[1]))
                 bridged: List[Tuple[float, float, float, float]] = []
                 for st_c, en_c, pl_c, pr_c in other_raw:
@@ -2546,7 +3092,15 @@ def align_multispeaker_or_reordered(
                             min(gap_hi, oen) - max(gap_lo, ost) > 0.04
                             for ost, oen, _, _ in own_spans
                         )
-                        if same_ch and not has_own_in_gap:
+                        # CTC 音素活跃守卫：仅当缝隙内确实检出非 blank 音素尖峰（极可能是对方短插话/接龙）时才阻止跨缝桥接，
+                        # 避免在含混响/底噪的普通换气停顿处被低阈值 speech_frame_mask 误断
+                        has_active_speech_in_gap = False
+                        if (gap_hi - gap_lo) >= 0.35:
+                            gf0 = max(0, int(round((gap_lo + 0.06) / FRAME_SEC)))
+                            gf1 = min(len(_ctc_nb_active), int(round((gap_hi - 0.06) / FRAME_SEC)))
+                            if gf1 > gf0 and int(np.sum(_ctc_nb_active[gf0:gf1])) >= 2:
+                                has_active_speech_in_gap = True
+                        if same_ch and not has_own_in_gap and not has_active_speech_in_gap:
                             bridged[-1] = (
                                 bridged[-1][0],
                                 max(bridged[-1][1], en_c),
@@ -2644,6 +3198,39 @@ def align_multispeaker_or_reordered(
             base_emission_2d=coop_emission,
             log=log,
             clause_surfaces=clause_surfaces,
+        )
+
+        # ── 零依赖 MMS-FA 浅层声纹原型裁决 + 局部越序短句校正 ──
+        vp_judge = _SpeakerVoiceprintJudge(
+            acoustic_ctx=acoustic_ctx,
+            spk_chains=spk_chains,
+            per_spk_results=per_spk_results,
+            ono_clause_flags=ono_clause_flags,
+            is_solo_cached=_is_solo_cached,
+            log=log,
+            clause_speakers=clause_speakers,
+        )
+        _resolve_same_text_swaps(
+            spk_chains=spk_chains,
+            per_spk_results=per_spk_results,
+            alignment_tokens=alignment_tokens,
+            ono_clause_flags=ono_clause_flags,
+            vp_judge=vp_judge,
+            log=log,
+            clause_speakers=clause_speakers,
+        )
+        _rescue_out_of_order_short_clauses(
+            spk_chains=spk_chains,
+            per_spk_results=per_spk_results,
+            alignment_tokens=alignment_tokens,
+            line_group=line_group,
+            ono_clause_flags=ono_clause_flags,
+            acoustic_ctx=acoustic_ctx,
+            base_emission_2d=coop_emission,
+            vp_judge=vp_judge,
+            log=log,
+            clause_surfaces=clause_surfaces,
+            clause_speakers=clause_speakers,
         )
 
         merged_clause_map: Dict[int, List[Dict[str, Any]]] = {}
@@ -2983,6 +3570,27 @@ def post_process_and_merge_streams(
     stream_sub_rls: Dict[int, List[Dict[str, Any]]] = {}
     stream_line_spans: Dict[int, List[Tuple[float, float]]] = {}
 
+    # 预计算各角色子流的原始有效子句时间区间，供单流 merge_short 避让跨角色插入台词
+    stream_raw_spans: Dict[int, List[Tuple[float, float]]] = {}
+    for sid_pre, cl_idxs_pre in enumerate(stream_clause_lists):
+        sp_list: List[Tuple[float, float]] = []
+        for ci_pre in cl_idxs_pre:
+            if ci_pre >= len(clause_ranges):
+                continue
+            s_p, e_p, _ = clause_ranges[ci_pre]
+            sts_p: List[float] = []
+            ens_p: List[float] = []
+            for oi_p in range(s_p, e_p):
+                if result_list[oi_p].get(F.ONO_DROPPED):
+                    continue
+                if oi_p in orig_rl_time:
+                    t_s, t_e = orig_rl_time[oi_p]
+                    sts_p.append(t_s)
+                    ens_p.append(t_e)
+            if sts_p:
+                sp_list.append((min(sts_p), max(ens_p)))
+        stream_raw_spans[sid_pre] = sp_list
+
     for stream_id, cl_indices in enumerate(stream_clause_lists):
         sub_rl: List[Dict[str, Any]] = []
         sub_ar: List[Dict[str, Any]] = []
@@ -3020,84 +3628,79 @@ def post_process_and_merge_streams(
             sub_rl.append({"orig": "\n", "type": 0, "pron": ""})
 
         if enable_ono_gate:
-            try:
-                from ono_filter import mark_ono_candidates as _ono_mark
-                _ono_mark(
-                    result_list=sub_rl,
-                    alignment_results=sub_ar,
-                    token_to_index_map=sub_tok_map,
-                    log_callback=None,
-                )
-                # 保护含明确谓语/句尾助词的短句（如「ビクってしたぁ」），避免因跨角色轮次间隔被误标为飞走拟声
-                _cl_buf: List[int] = []
-                for _idx_s, _it_s in enumerate(sub_rl):
-                    if _clause_mod.is_clause_boundary(_it_s):
-                        if _cl_buf:
-                            _surf = "".join(sub_rl[k].get("orig", "") for k in _cl_buf)
-                            if any(kw in _surf for kw in ("した", "して", "てる", "ちゃ", "だよ", "だね", "かな", "もん")):
-                                for k in _cl_buf:
-                                    sub_rl[k].pop(F.ONO_MARK, None)
-                                    sub_rl[k][F.CLAUSE_ONO] = False
-                            _cl_buf = []
-                    elif _it_s.get("pron"):
-                        _cl_buf.append(_idx_s)
-            except Exception:
-                pass
+            from ono_filter import mark_ono_candidates as _ono_mark
+            _ono_mark(
+                result_list=sub_rl,
+                alignment_results=sub_ar,
+                token_to_index_map=sub_tok_map,
+                log_callback=None,
+            )
+            # 保护含明确谓语/句尾助词的短句（如「ビクってしたぁ」），避免因跨角色轮次间隔被误标为飞走拟声
+            _cl_buf: List[int] = []
+            for _idx_s, _it_s in enumerate(sub_rl):
+                if _clause_mod.is_clause_boundary(_it_s):
+                    if _cl_buf:
+                        _surf = "".join(sub_rl[k].get("orig", "") for k in _cl_buf)
+                        if any(kw in _surf for kw in ("した", "して", "てる", "ちゃ", "だよ", "だね", "かな", "もん")):
+                            for k in _cl_buf:
+                                sub_rl[k].pop(F.ONO_MARK, None)
+                                sub_rl[k][F.CLAUSE_ONO] = False
+                        _cl_buf = []
+                elif _it_s.get("pron"):
+                    _cl_buf.append(_idx_s)
 
         if enable_resegment:
-            try:
-                from resegment import apply_punctuation_resegment as _reseg
-                sub_rl = _reseg(sub_rl, sub_rl_time, frame_sec=0.02, thr_frames=50, max_line_chars=22)
-                # 若重分段把行中单假名口吃（如「…、き、\n綺麗…」）切在了上一行末尾，将其并回下一行行首
-                _k_nl = 0
-                while _k_nl < len(sub_rl):
-                    if sub_rl[_k_nl].get("orig") == "\n" and sub_rl[_k_nl].get(F.INSERTED):
-                        # 找 \n 左侧最后一个子句的发音 token
-                        _p_end = _k_nl - 1
-                        while _p_end >= 0 and sub_rl[_p_end].get("orig") != "\n" and _clause_mod.is_punct_symbol(sub_rl[_p_end]):
-                            _p_end -= 1
-                        _p_st = _p_end
-                        while _p_st >= 0 and sub_rl[_p_st].get("orig") != "\n" and not _clause_mod.is_clause_boundary(sub_rl[_p_st]):
-                            _p_st -= 1
-                        _cl_left = [m for m in range(_p_st + 1, _p_end + 1) if 0 <= m < len(sub_rl) and sub_rl[m].get("pron")]
-                        # 找 \n 右侧第一个发音 token
-                        _r_first = _k_nl + 1
-                        while _r_first < len(sub_rl) and sub_rl[_r_first].get("orig") != "\n" and not sub_rl[_r_first].get("pron"):
-                            _r_first += 1
-                        if (_cl_left
-                                and _p_st >= 0
-                                and sub_rl[_p_st].get("orig") != "\n"
-                                and _r_first < len(sub_rl)
-                                and sub_rl[_r_first].get("pron")):
-                            _s_left = "".join(sub_rl[m].get("orig", "") for m in _cl_left)
-                            _p_left = "".join(sub_rl[m].get("pron", "") for m in _cl_left)
-                            _p_right = str(sub_rl[_r_first].get("pron", ""))
-                            if len(_s_left) == 1 and _p_left and _p_right.startswith(_p_left):
-                                _nl_item = sub_rl.pop(_k_nl)
-                                sub_rl.insert(_p_st + 1, _nl_item)
-                    _k_nl += 1
-            except Exception:
-                pass
+            from resegment import apply_punctuation_resegment as _reseg
+            sub_rl = _reseg(sub_rl, sub_rl_time, frame_sec=0.02, thr_frames=50, max_line_chars=22)
+            # 若重分段把行中单假名口吃（如「…、き、\n綺麗…」）切在了上一行末尾，将其并回下一行行首
+            _k_nl = 0
+            while _k_nl < len(sub_rl):
+                if sub_rl[_k_nl].get("orig") == "\n" and sub_rl[_k_nl].get(F.INSERTED):
+                    # 找 \n 左侧最后一个子句的发音 token
+                    _p_end = _k_nl - 1
+                    while _p_end >= 0 and sub_rl[_p_end].get("orig") != "\n" and _clause_mod.is_punct_symbol(sub_rl[_p_end]):
+                        _p_end -= 1
+                    _p_st = _p_end
+                    while _p_st >= 0 and sub_rl[_p_st].get("orig") != "\n" and not _clause_mod.is_clause_boundary(sub_rl[_p_st]):
+                        _p_st -= 1
+                    _cl_left = [m for m in range(_p_st + 1, _p_end + 1) if 0 <= m < len(sub_rl) and sub_rl[m].get("pron")]
+                    # 找 \n 右侧第一个发音 token
+                    _r_first = _k_nl + 1
+                    while _r_first < len(sub_rl) and sub_rl[_r_first].get("orig") != "\n" and not sub_rl[_r_first].get("pron"):
+                        _r_first += 1
+                    if (_cl_left
+                            and _p_st >= 0
+                            and sub_rl[_p_st].get("orig") != "\n"
+                            and _r_first < len(sub_rl)
+                            and sub_rl[_r_first].get("pron")):
+                        _s_left = "".join(sub_rl[m].get("orig", "") for m in _cl_left)
+                        _p_left = "".join(sub_rl[m].get("pron", "") for m in _cl_left)
+                        _p_right = str(sub_rl[_r_first].get("pron", ""))
+                        if len(_s_left) == 1 and _p_left and _p_right.startswith(_p_left):
+                            _nl_item = sub_rl.pop(_k_nl)
+                            sub_rl.insert(_p_st + 1, _nl_item)
+                _k_nl += 1
 
         if enable_merge_short:
-            try:
-                from merge_short import merge_short_lines as _merge
-                sub_rl = _merge(
-                    sub_rl,
-                    max_chars=merge_short_chars,
-                    max_gap=merge_short_gap,
-                    ono_max_chars=merge_ono_chars,
-                    ono_max_gap=merge_ono_gap,
-                )
-            except Exception:
-                pass
+            from merge_short import merge_short_lines as _merge
+            _other_spans = [
+                sp
+                for other_sid, sps in stream_raw_spans.items()
+                if other_sid != stream_id
+                for sp in sps
+            ]
+            sub_rl = _merge(
+                sub_rl,
+                max_chars=merge_short_chars,
+                max_gap=merge_short_gap,
+                ono_max_chars=merge_ono_chars,
+                ono_max_gap=merge_ono_gap,
+                forbidden_spans=_other_spans if _other_spans else None,
+            )
 
         if enable_ono_gate:
-            try:
-                from ono_filter import decide_ono_deletions as _ono_decide
-                _ono_decide(result_list=sub_rl, log_callback=None)
-            except Exception:
-                pass
+            from ono_filter import decide_ono_deletions as _ono_decide
+            _ono_decide(result_list=sub_rl, log_callback=None)
 
         stream_sub_rls[stream_id] = sub_rl
         spans_this: List[Tuple[float, float]] = []
@@ -3231,7 +3834,9 @@ def post_process_and_merge_streams(
                                 last_sem_idx = max(i_c for i_c, (_, is_o, _, _) in enumerate(line_clauses) if not is_o)
                                 for i_c, (c_idxs, is_ono_c, _, _) in enumerate(line_clauses):
                                     if is_ono_c and (i_c < first_sem_idx or i_c > last_sem_idx):
-                                        _drop_clause_and_punct(c_idxs, sub_rl, ln_start, ln_end)
+                                        surf_edge = "".join(sub_rl[p].get("orig", "") for p in c_idxs)
+                                        if surf_edge not in _CONV_KEEP_SET:
+                                            _drop_clause_and_punct(c_idxs, sub_rl, ln_start, ln_end)
                             else:
                                 for c_idxs, is_ono_c, _, _ in line_clauses:
                                     if is_ono_c:
@@ -3274,6 +3879,7 @@ def post_process_and_merge_streams(
         re_split_rl: List[Dict[str, Any]] = []
         tmp_seg: List[Dict[str, Any]] = []
         prev_lg_val: Optional[int] = None
+        prev_spk_val: Optional[Tuple[str, ...]] = None
         at_clause_bound = True
         for it_x in sub_rl:
             if it_x.get("orig") == "\n":
@@ -3282,6 +3888,7 @@ def post_process_and_merge_streams(
                     tmp_seg = []
                 re_split_rl.append(it_x)
                 prev_lg_val = None
+                prev_spk_val = None
                 at_clause_bound = True
                 continue
             if _clause_mod.is_clause_boundary(it_x):
@@ -3290,15 +3897,25 @@ def post_process_and_merge_streams(
                 continue
             if it_x.get("pron") and not it_x.get(F.ONO_DROPPED):
                 lg_x = it_x.get("_ms_lg")
-                if (at_clause_bound
-                        and lg_x is not None
-                        and prev_lg_val is not None
-                        and abs(int(lg_x) - int(prev_lg_val)) > 2):
+                spk_x = tuple(it_x[F.SPK]) if it_x.get(F.SPK) else None
+                spk_diff = (
+                    spk_x is not None
+                    and prev_spk_val is not None
+                    and spk_x != prev_spk_val
+                )
+                lg_jump = (
+                    lg_x is not None
+                    and prev_lg_val is not None
+                    and abs(int(lg_x) - int(prev_lg_val)) > 2
+                )
+                if at_clause_bound and (lg_jump or spk_diff):
                     re_split_rl.extend(tmp_seg)
                     re_split_rl.append({"orig": "\n", "type": 0, "pron": "", F.INSERTED: True})
                     tmp_seg = []
                 if lg_x is not None:
                     prev_lg_val = int(lg_x)
+                if spk_x is not None:
+                    prev_spk_val = spk_x
                 at_clause_bound = False
             tmp_seg.append(it_x)
         if tmp_seg:
@@ -3373,16 +3990,27 @@ def post_process_and_merge_streams(
 
     from merge_short import append_tokens_with_space as _append_with_space
 
+    def _blk_spk(blk: List[Dict[str, Any]]) -> Optional[Tuple[str, ...]]:
+        for x in blk:
+            if not x.get(F.ONO_DROPPED) and x.get(F.SPK):
+                return tuple(x[F.SPK])
+        return None
+
     consolidated_lines: List[Tuple[float, float, int, int, int, List[Dict[str, Any]]]] = []
     for sid, s_items in by_stream.items():
         idx_s = 0
         while idx_s < len(s_items):
             st_c, en_c, _, seq_c, lg_c, blk_c, is_ov_c = s_items[idx_s]
             blk_merged = [copy.copy(x) for x in blk_c]
+            spk_c = _blk_spk(blk_merged)
             last_lg = lg_c
             idx_next = idx_s + 1
             while idx_next < len(s_items):
                 st_n, en_n, _, _, lg_n, blk_n, is_ov_n = s_items[idx_next]
+                spk_n = _blk_spk(blk_n)
+                # 严禁将不同说话人组合（例如多人齐声【A、B】与单人【A】）聚合进同一行，避免前缀误覆盖
+                if spk_c is not None and spk_n is not None and spk_c != spk_n:
+                    break
                 gap_cn = st_n - en_c
                 dur_n = max(0.10, en_n - st_n)
                 vis_n = _visible_len(blk_n)

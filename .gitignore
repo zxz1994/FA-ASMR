@@ -56,3 +56,7 @@ Desktop.ini
 
 # 自检日志
 FA-ASMR_selftest.log
+
+# 本地测试音声目录与会话日志
+RJ*/
+_sess.jsonl

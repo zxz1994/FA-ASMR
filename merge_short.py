@@ -30,6 +30,7 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import re
+import sys
 
 # 子句概念统一到 clause.py（全项目唯一判据）
 import clause
@@ -54,11 +55,19 @@ def _visible_chars(result_list: List[Dict[str, Any]], start: int, end: int) -> i
     """[start,end) 区间的【字数】—— 每个子句取其 `_kana_n`，只算一次。"""
     seen = set()
     n = 0
+    fallback_head = None
     for i in range(start, end):
         it = result_list[i]
+        if clause.is_clause_boundary(it):
+            fallback_head = None
+            continue
         if not it.get("pron"):
             continue
-        head = it.get(F.CLAUSE_HEAD, i)
+        if fallback_head is None:
+            fallback_head = i
+        head = it.get(F.CLAUSE_HEAD)
+        if head is None:
+            head = fallback_head
         if head in seen:
             continue
         seen.add(head)
@@ -95,13 +104,16 @@ def _is_easy_ono(result_list: List[Dict[str, Any]], start: int, end: int) -> boo
         return False
     try:
         from ono_filter import is_easy_ono
-        return is_easy_ono("".join(toks))
-    except Exception as e:
+    except ImportError as e:
         if not _ONO_IMPORT_WARNED:
             _ONO_IMPORT_WARNED = True
-            print(f"  ⚠ [merge_short] 易错拟声判定不可用（{type(e).__name__}: {e}），"
-                  "已降级为「一律非拟声」——拟声合并的宽松上限失效。")
+            print(
+                f"  ⚠ [merge_short] 易错拟声判定不可用（{type(e).__name__}: {e}），"
+                "已降级为「一律非拟声」——拟声合并的宽松上限失效。",
+                file=sys.stderr,
+            )
         return False
+    return is_easy_ono("".join(toks))
 
 
 def _to_seconds(v) -> Optional[float]:
@@ -293,8 +305,14 @@ def merge_short_lines(
     max_gap: float = 1.5,
     ono_max_chars: int = 40,
     ono_max_gap: float = 2.5,
+    forbidden_spans: Optional[List[tuple]] = None,
 ) -> List[Dict[str, Any]]:
-    """按【子句】重排字幕行（见模块文档）。"""
+    """按【子句】重排字幕行（见模块文档）。
+
+    可选 ``forbidden_spans``：多人模式传入他方角色的真实发声区间 ``[(st, en), ...]``。
+    当本角色相邻两子句之间存在明显停顿（>= 0.35s）且停顿内被他方角色占据 >= 0.30s 时，
+    禁止跨着对方台词把前后两句合并成一条长字幕。
+    """
     clauses = _split_clauses(result_list)
     if not clauses:
         return list(result_list)
@@ -350,12 +368,14 @@ def merge_short_lines(
             m_prev = metas[i]
             m_next = metas[i + 1]
 
-            # 说话人切换：不同说话人加 1.0s 软阻力（非硬分割，仅当声学完全紧贴时允许）
+            # 说话人切换：不同说话人加 1.0s 软阻力；若任一侧为多人齐声(len>=2)则硬断行，避免齐声前缀误盖单人句
             spk_changed = (
                 m_prev["spk"] is not None
                 and m_next["first_spk"] is not None
                 and m_prev["spk"] != m_next["first_spk"]
             )
+            if spk_changed and (len(m_prev["spk"]) >= 2 or len(m_next["first_spk"]) >= 2):
+                break
 
             nxt_easy = m_next["easy"]
             both_easy = cur_easy and nxt_easy
@@ -369,9 +389,16 @@ def merge_short_lines(
             # 判据 ②：本子句末字 end -> 下一子句首字 start 的真实停顿
             if m_prev["en"] is None or m_next["st"] is None:
                 break
-            gap = (m_next["st"] - m_prev["en"]) + (1.0 if spk_changed else 0.0)
+            raw_gap = m_next["st"] - m_prev["en"]
+            gap = raw_gap + (1.0 if spk_changed else 0.0)
             if gap > lim_g:
                 break
+
+            # 判据 ②b（多人模式跨角色避让）：两子句间存在停顿且缝隙内夹着他方角色发言时禁止合并
+            if forbidden_spans and raw_gap >= 0.35:
+                t_a, t_b = m_prev["en"], m_next["st"]
+                if any(min(t_b, o_en) - max(t_a, o_st) >= 0.30 for o_st, o_en in forbidden_spans):
+                    break
 
             # 判据 ③：防「句尾吸句首」前瞻竞争（仅在 cur + C_{i+1} + C_{i+2} 无法同时塞进一行时生效）
             # 如果 cur + C_{i+1} + C_{i+2} 本身就能全部装进当前行（如短拟声串），绝不拆开！

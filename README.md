@@ -1,4 +1,4 @@
-# FA-ASMR (`v2.4.0`)
+# FA-ASMR (`v2.5.0`)
 
 [English](README_EN.md) | **简体中文** | [Agent 操作指南 (AGENTS.md)](AGENTS.md)
 
@@ -32,10 +32,10 @@
 
 无需安装 Python 与 PyTorch，解压即用，已完整内置 1.26 GB MMS-FA 基础模型、yomikata dBert 权重与 ASMR LoRA 适配器：
 
-* **Windows CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.4.0-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
-* **Windows CUDA GPU 版**（推荐 N 卡用户，支持 4 GB+ 显存）：下载全部分卷（`FA-ASMR-v2.4.0-Windows-GPU.zip.001` 等）与 `merge_split_gpu_zip.bat` 至同一目录，双击合并脚本后解压运行 `运行FA-ASMR.bat`。
+* **Windows CPU 版**（兼容所有电脑）：下载 `FA-ASMR-v2.5.0-Windows-CPU.zip`，解压后双击 `运行FA-ASMR.bat`；
+* **Windows CUDA GPU 版**（推荐 N 卡用户，支持 4 GB+ 显存）：下载全部分卷（`FA-ASMR-v2.5.0-Windows-GPU.zip.001` 等）与 `merge_split_gpu_zip.bat` 至同一目录，双击合并脚本后解压运行 `运行FA-ASMR.bat`。
 
-> 前往下载：[GitHub Releases (v2.4.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+> 前往下载：[GitHub Releases (v2.5.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
 ### 2.2 源码运行（开发者 / CLI / Agent 环境）
 

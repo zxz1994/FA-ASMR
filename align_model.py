@@ -10,6 +10,7 @@ import torch.nn as nn
 import torchaudio
 import math
 import os
+import sys
 import logging
 from typing import Optional, List, Dict, Any
 
@@ -71,10 +72,8 @@ class LoraAdapter:
         self.last_error = None      # 公开字段：最近一次加载错误信息
 
     def apply(self) -> nn.Module:
-        if self.lora_path is not None and self._try_load():
-            pass
-        elif self.lora_path is not None:
-            logger.warning("[LoRA] 加载失败，回退到基础 MMS 模型")
+        if self.lora_path is not None:
+            self._try_load()
         return self.model
 
     def reload(self, lora_path: str) -> nn.Module:
@@ -83,8 +82,18 @@ class LoraAdapter:
 
     def _try_load(self) -> bool:
         try:
+            if not os.path.isfile(str(self.lora_path)):
+                raise FileNotFoundError(f"LoRA 权重文件不存在: {self.lora_path}")
             ckpt = torch.load(self.lora_path, map_location="cpu", weights_only=False)
+            if not isinstance(ckpt, dict):
+                raise ValueError(f"LoRA 权重格式非法：期望 dict，实际为 {type(ckpt).__name__}")
+            missing_sections = [k for k in ("w2v2_lora", "aux") if k not in ckpt]
+            if missing_sections:
+                raise KeyError(f"LoRA 权重缺少必要字段: {', '.join(missing_sections)}")
+
             config = ckpt.get("config", {})
+            if not isinstance(config, dict):
+                raise ValueError(f"LoRA config 字段非法：期望 dict，实际为 {type(config).__name__}")
             target_modules = config.get("target_modules", ["k_proj", "q_proj", "v_proj", "out_proj"])
             r = config.get("r", 8)
             alpha = config.get("alpha", 16)
@@ -96,13 +105,17 @@ class LoraAdapter:
             for p in self.w2v2.parameters():
                 p.requires_grad = False
 
-            self._inject_lora(target_modules, r, alpha, device)
+            replaced = self._inject_lora(target_modules, r, alpha, device)
+            if replaced == 0:
+                raise RuntimeError(
+                    f"未匹配到任何可注入的 Linear 目标层 (targets={target_modules})"
+                )
 
             missing, unexpected = self.w2v2.load_state_dict(ckpt["w2v2_lora"], strict=False)
             if missing:
                 logger.info(f"[LoRA] w2v2 缺失 {len(missing)} keys (正常，只加载 lora)")
             if unexpected:
-                logger.info(f"[LoRA] w2v2 多余 {len(unexpected)} keys")
+                logger.warning(f"[LoRA] w2v2 多余 {len(unexpected)} keys")
 
             self.aux.load_state_dict(ckpt["aux"])
 
@@ -117,15 +130,19 @@ class LoraAdapter:
             logger.info(f"[LoRA] 可训参数: {trainable:,}")
 
             self._loaded = True
-            logger.info(f"[LoRA] 加载成功 (epoch={ckpt.get('epoch','?')}, loss={ckpt.get('loss','?'):.4f})")
+            self.last_error = None
+            loss_val = ckpt.get("loss", "?")
+            loss_str = f"{loss_val:.4f}" if isinstance(loss_val, (int, float)) else str(loss_val)
+            logger.info(f"[LoRA] 加载成功 (epoch={ckpt.get('epoch','?')}, loss={loss_str})")
             return True
 
         except Exception as e:
-            self.last_error = str(e)
-            logger.warning(f"[LoRA] 加载失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+            self.last_error = f"{type(e).__name__}: {e}"
+            logger.error(f"[LoRA] 加载失败 ({self.lora_path}): {self.last_error}")
+            raise RuntimeError(
+                f"[LoRA] 权重加载失败 ({self.lora_path}): {self.last_error}。"
+                "为避免模型状态损坏或静默降级，已终止加载。"
+            ) from e
 
     def _merge_for_inference(self) -> int:
         """Fold eval-mode LoRA weights into base Linear modules."""
@@ -149,9 +166,9 @@ class LoraAdapter:
 
     def _inject_lora(
         self, target_modules: List[str], r: int, alpha: int, device: torch.device
-    ) -> None:
+    ) -> int:
         if self._injected:
-            return
+            return 1
 
         replaced = 0
 
@@ -182,6 +199,7 @@ class LoraAdapter:
 
         self._injected = True
         logger.info(f"[LoRA] 注入 {replaced} 个线性层 (r={r}, alpha={alpha})")
+        return replaced
 
 
 _MODEL_CACHE: Dict[Any, nn.Module] = {}
@@ -232,10 +250,7 @@ def _get_model(bundle, device, lora_path=None, log_callback=None,
         original_device = next(model.parameters()).device
         adapter = LoraAdapter(model.cpu(), lora_path)
         model = adapter.apply()
-        if adapter.last_error:
-            msg = f"[LoRA] 加载失败: {adapter.last_error}，回退到基础 MMS 模型"
-        else:
-            msg = f"[LoRA] 已注入，模型位于 {original_device}"
+        msg = f"[LoRA] 已注入，模型位于 {original_device}"
         logger.info(msg)
         if log_callback:
             log_callback(msg)
@@ -248,13 +263,26 @@ def _get_model(bundle, device, lora_path=None, log_callback=None,
         if cpu_threads is None:
             try:
                 cpu_threads = max(1, (os.cpu_count() or 4))
-            except Exception:
+            except Exception as e:
+                logger.warning(f" [CPU] 获取 CPU 核数失败，回退默认 4 线程: {e}")
                 cpu_threads = 4
         try:
             torch.set_num_threads(int(cpu_threads))
+        except Exception as e:
+            warn_msg = f"  ⚠ [CPU] 设置推理线程数 ({cpu_threads}) 失败: {type(e).__name__}: {e}"
+            logger.warning(warn_msg)
+            if log_callback:
+                log_callback(warn_msg)
+        try:
             torch.set_num_interop_threads(max(1, int(cpu_threads) // 2))
-        except Exception:
+        except RuntimeError:
+            # PyTorch 在并行任务启动后禁止重复修改 interop 线程数，属预期行为
             pass
+        except Exception as e:
+            warn_msg = f"  ⚠ [CPU] 设置 interop 线程数失败: {type(e).__name__}: {e}"
+            logger.warning(warn_msg)
+            if log_callback:
+                log_callback(warn_msg)
         if quantize_int8:
             try:
                 import torch.ao.quantization as aq
@@ -262,7 +290,12 @@ def _get_model(bundle, device, lora_path=None, log_callback=None,
                 model = aq.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
                 logger.info(f" [CPU] 已启用 int8 动态量化 + 线程数={cpu_threads}")
             except Exception as e:
-                logger.warning(f" [CPU] int8 量化失败，回退 float32: {e}")
+                warn_msg = f"  ⚠ [CPU] int8 量化失败，已回退 float32: {type(e).__name__}: {e}"
+                logger.warning(warn_msg)
+                if log_callback:
+                    log_callback(warn_msg)
+                else:
+                    print(warn_msg, file=sys.stderr)
 
     _MODEL_CACHE[key] = model
     return model
@@ -279,16 +312,30 @@ def clear_model_cache():
 
 
 def _resolve_device(device):
-    if device == "cuda":
+    if isinstance(device, torch.device):
+        if device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "指定了 CUDA 设备，但当前环境未检测到可用的 NVIDIA GPU / CUDA 支持。请改用 cpu 或 auto。"
+            )
+        return device
+    dev_str = str(device).strip().lower()
+    if dev_str == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "指定了 CUDA 设备，但当前环境未检测到可用的 NVIDIA GPU / CUDA 支持。请改用 cpu 或 auto。"
+            )
         return torch.device("cuda")
-    if device == "cpu":
+    if dev_str == "cpu":
         return torch.device("cpu")
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if dev_str == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    raise ValueError(f"不支持的推理设备: {device!r}（仅支持 'auto' / 'cuda' / 'cpu'）")
 
 
 def compute_emission(waveform, sample_rate, device="auto", lora_path=None,
                      chunk_frames=3000, use_stereo_pick=True,
-                     cpu_threads=None, quantize_int8=None, cpu_chunk_cap=None):
+                     cpu_threads=None, quantize_int8=None, cpu_chunk_cap=None,
+                     log_callback=None):
     """与 align_audio_with_text 内部的发射计算完全一致（vad=None 路径），
     但可被外部复用：同一份发射喂给多个 config，消除 GPU 卷积非确定性导致的
     跨 config 起点漂移。返回 (emission_L, emission_R)，均为 CPU 张量。
@@ -302,6 +349,8 @@ def compute_emission(waveform, sample_rate, device="auto", lora_path=None,
             "当前 torchaudio 不含 MMS_FA pipeline。FA-ASMR 强制对齐依赖它，"
             "需要 torchaudio==2.6.0（与打包 exe 内置版本一致）。\n"
             "请执行: pip install torch==2.6.0 torchaudio==2.6.0")
+    if waveform is None or waveform.numel() == 0 or waveform.shape[-1] == 0:
+        raise ValueError("音频波形为空（0 采样），无法执行声学对齐")
     if waveform.dim() == 1:
         waveform = waveform.unsqueeze(0)
     max_val = torch.max(torch.abs(waveform))
@@ -315,7 +364,7 @@ def compute_emission(waveform, sample_rate, device="auto", lora_path=None,
         waveform = torchaudio.functional.resample(
             waveform, sample_rate, bundle.sample_rate)
     is_stereo = waveform.shape[0] > 1
-    model = _get_model(bundle, device, lora_path, None,
+    model = _get_model(bundle, device, lora_path, log_callback,
                        cpu_threads=cpu_threads, quantize_int8=quantize_int8)
 
     def _chunk_params():
@@ -356,6 +405,8 @@ def compute_emission(waveform, sample_rate, device="auto", lora_path=None,
                 valid = emission_chunk[:, left_frames:left_frames + keep_frames, :]
                 local.append(valid if accumulate_on_device else valid.cpu())
                 del chunk_audio, emission_chunk, valid
+        if not local:
+            raise ValueError("音频过短，未产生任何有效声学帧，无法执行对齐")
         merged = torch.cat(local, dim=1)
         del local
         res = merged.cpu() if accumulate_on_device else merged

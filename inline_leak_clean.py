@@ -540,6 +540,13 @@ class InlineLeakCleaner:
                         return cand, m
                     if m == 1 and orig_en == i:
                         if L not in _PARTICLES_1:
+                            # 合法动词「する」的活用形（如 ご奉仕して / いい年して 的 し）绝不能当作单字振假名泄露删掉
+                            next_t = next(((nst, nen, nw) for nst, nen, nw in T0 if nst == i), None)
+                            if next_t is not None:
+                                n_pos1 = self._feat(next_t[2], 'pos1')
+                                n_lemma = self._feat(next_t[2], 'lemma').split('-')[0]
+                                if n_pos1 == '動詞' or n_lemma == _SURU:
+                                    continue
                             self.stats['rules']['SINGLE_NONPARTICLE'] = \
                                 self.stats['rules'].get('SINGLE_NONPARTICLE', 0) + 1
                             return cand, m

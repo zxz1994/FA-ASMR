@@ -9,11 +9,13 @@
 - **FA-ASMR 负责（确定性物理层）**：根据日文台本与人声音频，纯离线输出毫秒级精确对齐的 `.lrc` 与 `.srt` 原文日轴。
   - 引擎已原生内置自动编码识别（UTF-8 / UTF-8-BOM / Shift-JIS(CP932) / GB18030 / UTF-16 均可直接读取，**无需手动转码**）；
   - 已内置 `ono_filter` 拟声守门、标点重分段与短句合并，产出的日轴已完成碎句整理与孤立杂音过滤；
+  - 提供纯离线精度闭环工具：**去重注音词表导出与覆写**（`--export-ruby` / `--ruby-map`）、**对齐后声学体检雷达**（`fa_asmr_audit.py` / `--audit`）与**零依赖立体声空间分离**（`fa_asmr_spatial_sep.py` / `--audit-separate`）；
   - 底层固定最优 `3000` 帧分块 + CUDA FP16 推理（峰值显存 ~3.74 GB，4 GB+ 显存即可运行）。
 - **Agent 负责（强语境语义层）**：
   1. **前置**：从官方 PDF / DOCX / TXT 提取并清洗纯发音台本（含竖排/分栏/颜色分角色 PDF 解析）、规范说话人标注与文件名配对；
-  2. **调用**：按剧情与人声清晰度语义判定对齐模式（尤其是区分真双视角 vs 仅隔墙闷音处理），通过 `fa_asmr_cli.py` 执行预检与对齐；
-  3. **后置**：直接基于产出日轴做逐行语境化翻译，输出自然流畅的中文/双语字幕（保留原时间戳与说话人前缀）。
+  2. **注音审校与对齐**：导出 `ruby_glossary` 审校专有名词/多音字读音并注入 `--ruby-map`；按剧情与人声清晰度语义判定对齐模式（尤其是区分真双视角 vs 仅隔墙闷音处理），执行对齐并开启 `--audit-separate`；
+  3. **体检复核与补全**：结合体检报告的 `suspect_clauses` 与 `unaligned_speech_gaps`，听审切出的原生采样率 WAV（含自动空间分离出的左/中/右干声），补全漏句/即兴加词或删去台本里未录制的删戏句；
+  4. **后置**：基于定稿日轴做逐行语境化翻译，输出自然流畅的中文/双语字幕（保留原时间戳与说话人前缀）。
 
 ---
 
@@ -78,37 +80,98 @@
 > - **适用 `multi_persp`**：两轨视角**各自都有角色说话，且不同角色或段落的清晰度在两轨之间形成互补**（例如：视角 A 中角色甲贴耳清晰、角色乙发远模糊，而视角 B 中角色乙清晰、角色甲发远；或双机位交替移动导致两轨各有一部分更清晰）。此时两轨联合择优才能显著提升整体打轴精度。
 > - **无需 `multi_persp`**：如果另一轨**仅仅是隔墙处理（闷音/低通滤波/整体远距衰减）**，不存在“另一轨反而有某段更清晰人声”的互补关系，则完全没必要跑 `multi_persp`——直接用清晰主轨跑 `single` 或 `multi_speaker` 即可（若隔墙轨也需要字幕，复用清晰主轨的对齐结果即可）。
 
-#### 2. 预检命令
+#### 2. 预检与注音词表审校（推荐在对齐前先做）
+
+AutoRuby（`fugashi` + `yomikata`）对角色人名、二次元复合词、口语汉字（如 `描→か`、`良い→いい`、`この中→なか`、`出た→で`、`何→なに`、`方→ほー`、`お人形→にんぎょー`）偶有误读。**不要让 LLM 重写整份台本注音**，而是导出紧凑的去重词表审校后通过 `--ruby-map` 精准覆写：
 
 ```bash
 # 轻量整目录配对预检（不加载模型，秒级检查配对、编码、角色与自动判定的模式）
 python fa_asmr_cli.py --batch ./作品目录 --dry-run --json
 
-# 单台本深度校验（真实运行 AutoRuby 注音、角色标题归一化、顿号桥接与子句数统计）
-python fa_asmr_cli.py --verify-script ./01.txt --json
+# 整目录一次加载模型，合并导出去重分级注音词表（高危多音/单字切碎/角色名排最前，按局部搭配去重采样上下文）
+python fa_asmr_cli.py --batch ./作品目录 --export-ruby --json-out ./ruby_batch.json
+
+# 单台本深度校验 + 导出去重注音词表（多音词与高危项排最前，附 1-based 原文件行号与局部搭配上下文）
+python fa_asmr_cli.py --verify-script ./01.txt --export-ruby --json-out ./ruby_01.json
 ```
 
-#### 3. 执行声学对齐
+审校 `ruby_batch.json` 中的 `ruby_glossary`（**优先精审 `priority == "high"` 与 `is_polyphone == true` 项，注意核对 `collocations` 与 `examples` 局部搭配**）后，仅把**确有错读**的词写成 `ruby_fixes.json`（无需修改原 `.txt`）：
+
+```json
+{
+  "global": {
+    "陽菜羽": "ひなは",
+    "槍峰": "やりみね",
+    "同級生": "どーきゅーせい",
+    "良い": "いい"
+  },
+  "by_file": {
+    "05": {
+      "by_line": {
+        "30": { "中": "なか" },
+        "48": { "何": "なに" }
+      }
+    }
+  }
+}
+```
+
+> **注音覆写编写注意**：
+> - `global` 采用最长优先匹配，适合**人名与多字词**；
+> - 容易嵌在复合词里的**单汉字**（如 `中` 可能出现在 `集中`、`出` 可能出现在 `出て/出して`、`何` 可能出现在 `何度`）优先写入 `by_file -> by_line`（键为原 `.txt` 的 1-based 行号），且单汉字覆写仅在分词后作用于独立 `{单字|...}`，不会劈裂复合词；
+> - `ruby_map` 同时在注音前与注音后执行权威覆写，优先级高于 `yomikata` 模型。
+
+#### 3. 执行声学对齐、声学体检与立体声空间分离联动
 
 ```bash
-# 单条对齐（自动判模式；JSON 摘要走 stdout，过程日志自动走 stderr）
-python fa_asmr_cli.py --audio ./01.flac --script ./01.txt --json
+# 推荐标准命令：整目录批量对齐（复用显存 + 声学体检 + 默认仅切 priority_review 高危 WAV + 多人轨自动空间分离，单人轨自动跳过拆轨）
+python fa_asmr_cli.py --batch ./作品目录 --ruby-map ./ruby_fixes.json --audit-separate --audit-out ./audit_batch.json --audit-clips-dir ./audit_clips --json
 
-# 单条附带 1.5s 行尾延长
-python fa_asmr_cli.py --audio ./01.wav --script ./01.txt --extend 1.5 --json
+# 听审修完少数几轨台本后，用 --only 局部重跑（仍复用单次模型加载，避免逐轨冷启动）
+python fa_asmr_cli.py --batch ./作品目录 --only 05,07,13 --ruby-map ./ruby_fixes.json --audit-separate --audit-out ./audit_realign.json --audit-clips-dir ./audit_clips_realign --json
 
-# 双视角联合对齐
-python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt --json
+# 单条对齐（含体检与切片）
+python fa_asmr_cli.py --audio ./01.flac --script ./01.txt --ruby-map ./ruby_fixes.json --audit-separate --audit-out ./audit_01.json --audit-clips-dir ./audit_clips --json
 
-# 整目录批量对齐（自动复用显存，结束后统一释放）
-python fa_asmr_cli.py --batch ./作品目录 --json
+# 双视角联合对齐 + 双视角联合体检（仅两侧均跳过才报未录，自动排除对侧闷音串扰）
+python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt --ruby-map ./ruby_fixes.json --audit-separate --audit-out ./audit_01.json --json
 ```
 
 常用可选参数：
 - `--device auto|cuda|cpu`：指定推理设备（默认 `auto`）；
 - `--output-dir <目录>`：重定向字幕输出目录（默认输出到各音频同级目录）；
+- `--only <列表>`：批量模式下按逗号分隔轨号或文件名关键词筛选（如 `--only 05,07,13`），适用于局部重跑或子集注音导出；
+- `--ruby-map <JSON>`：注入外部权威注音覆写字典（支持 `--verify-script` / 单条 / `--batch`）；
+- `--audit` / `--audit-out <JSON>`：零额外推理开销，输出声学体检报告（含顶层高危必审汇总 `priority_review`、`suspect_clauses` 与 `unaligned_speech_gaps`）；
+- `--audit-clips-dir <目录>`：合并相邻异常窗并切出原生采样率审听 WAV，默认仅切 `priority_review` 高危必审项与缺句空档（如需导出全部轻度低分 WAV 可加 `--audit-clips-all`）；
+- `--audit-separate` / `--audit-sep-sources 0|2|3|4`：正向联动立体声空间分离（`0` 自动判定：**单人轨保留完整体检与原声切片，仅自动跳过空间拆轨**；多人轨按说话人数自动选 2 或 3 路）；利用人头麦双耳相干度 `MSC` + 跨声道残差 `cres` 仅对真叠声段拆出左/中/右干声 WAV（写入 `separated_wavs`）；
 - `--no-ono-gate`：临时关闭内置拟声守门（保留全部拟声词原始时间戳供 Agent 自行精修）；
 - `--json-out <文件路径>`：将结构化 JSON 摘要写入文件（适用于打包后无控制台 `console=False` 的 `FA-ASMR.exe --cli ...` 场景）。
+
+#### 4. 体检复核与日轴定稿（闭环纠错，严禁未定稿日轴即开翻）
+
+读取 `audit_batch.json` 后，Agent **必须先聚焦各轨顶层的 `priority_review` 列表，实际调用多模态音频读取工具（如 `read_file` 听审对应 `clip_wav` / `separated_wavs`）**完成定向复核（严禁跳过听审仅凭文本猜测）：
+
+1. **`unaligned_speech_gaps`（台本缺句 / 声优即兴加词）**：
+   - 直接听审 `clip_wav`（若触发分离则听 `separated_wavs`），将缺失台词补回台本；
+2. **`skipped_semantic` / `compressed` 且极低分（台本删戏未录句）**：
+   - 听审确认未录制后，从清洗台本中剔除该行（同步留意 `by_line` 行号偏移）；
+3. **`isolated_speaker_jump`（多人轨短称呼词跨区前吸错位）**：
+   - 听审确认该时间点是否仅有另一角色在说话，并核查该短句的真实落点时间，按实听时间修正日轴；
+4. **若极低分项 `ruby_terms` 含汉字**：核查是否遗漏错读并补入 `ruby_fixes.json`；
+5. **用 `--batch ... --only <变动轨号>` 一次性重跑变动轨并复核 `priority_review`**，确保**日文终轴 100% 定稿后再进入阶段 3 翻译**（避免翻完再返工）。
+6. **独立调用立体声空间分离工具（`fa_asmr_spatial_sep.py`）**：
+   - 适用于事后基于既有 `audit.json` 补做分离，或**无台本多人人头麦**直接拆声听写（零额外模型权重、原生采样率无损保高频气音）：
+   ```bash
+   # 事后直接读取体检报告，仅对真重叠异常段做空间分离
+   python fa_asmr_spatial_sep.py --from-audit ./audit_01.json --out-dir ./sep_clips --only-stereo-spread --sources 3 --json
+
+   # 手动分离指定重叠时间段（例如 3 人左/中/右）
+   python fa_asmr_spatial_sep.py --audio ./02.flac --start 1267 --end 1275 --sources 3 --out-dir ./sep_out --json
+
+   # 无台本全轨自动扫描真叠声区间并批量拆轨
+   python fa_asmr_spatial_sep.py --audio ./02.flac --auto-overlaps --sources 3 --out-dir ./sep_overlaps --json
+   ```
 
 ---
 
@@ -123,17 +186,19 @@ python fa_asmr_cli.py --batch ./作品目录 --json
 1. **识别 RJ 编号并直连 DLsite 查询**：
    - 从作品文件夹名或文件名提取 RJ 编号（如 `RJ01435444`），直接查询对应 DLsite 作品页（如 `https://www.dlsite.com/maniax/work/=/product_id/{RJ编号}.html`，全年龄作可在 `home` 分区或通过作品名检索）；
    - 同时结合本地目录内自带的说明书、台本封面、人物介绍与音轨列表互证（若无网络或页面受限，则以本地资料与前后文推断为准）。
-2. **先整理作品设定与术语表再开翻**：
+2. **先整理紧凑的《角色设定与术语卡》（约 300~500 字）再开翻**：
    - **剧情与场景**：明确世界观、角色关系、氛围基调以及当前音轨在全剧中的剧情承接；
    - **角色人设与口吻**：锁定每位角色的性格与语域（如温柔年上、傲娇、病娇、敬语系、辣妹系、口癖与自称），以及对听众/主角的固定称呼；
    - **跨轨统一译名**：固定角色名、昵称、专有名词与关键设定词译法，确保同一作品多条音轨风格和译名始终一致；
-   - *提示*：DLsite 页面上的音轨介绍与视角/差分说明，也可以在**阶段 2**提前查阅，用来辅助确认说话人列表以及“真双视角 vs 仅隔墙处理”。
+   - *上下文瘦身建议*：多轨长作品在日轴全部定稿后，建议在进入翻译前提示用户或执行上下文压缩（如 `/compact`），甩掉前半程的审计日志与音频历史，轻装进入翻译。
 
-#### 3.2 逐行语境化翻译规范
+#### 3.2 紧凑格式逐行语境化翻译规范
 
-1. **直接信任并沿用引擎产出的时间轴与分行结构**：逐行一一对应翻译，不随意合并、拆分或改写时间戳；
-2. **角色人设与听觉沉浸感优先**：贴合已查明的角色口吻与场景情绪翻出自然口语化的中文/双语字幕（避免生硬直译腔），保留原有说话人前缀（SRT 为 `【角色名】`，LRC 为 `角色名：`）与情绪符号（`♡`、`……` 等）；
-3. **仅处理极少数漏网异常**：只有当某行明显属于拟声守门遗漏的纯非发音说明或异常残留时，才结合官方台本做最小化人工微调（严禁写正则脚本批量删改）。
+1. **用紧凑格式喂给翻译、用脚本回填（省 ~35%–40% 输入 Token）**：
+   - 使用仓库自带的 `tools/compact_subs.py` 剥离 SRT 时间戳与空行（`export` 导出 `行号|说话人|原文`），每翻完 2~3 轨立即落盘 JSON 并通过 `build` 自动回填生成中文 `.srt` + `.lrc`、`verify` 终检（严格校验 1:1 行数、时间戳、说话人前缀与 0 假名残留），无需在对话中重复回显整轨译文；
+2. **直接信任并沿用定稿日轴的时间轴与分行结构**：逐行一一对应翻译，不随意合并、拆分或改写时间戳；
+3. **角色人设与听觉沉浸感优先**：贴合已查明的角色口吻与场景情绪翻出自然口语化的中文/双语字幕（避免生硬直译腔），保留原有说话人前缀（SRT 为 `【角色名】`，LRC 为 `角色名：`）与情绪符号（`♡`、`……` 等）；
+4. **仅处理极少数漏网异常**：只有当某行明显属于拟声守门遗漏的纯非发音说明或异常残留时，才结合官方台本做最小化人工微调（严禁写正则脚本批量删改）。
 
 ---
 
@@ -145,8 +210,10 @@ python fa_asmr_cli.py --batch ./作品目录 --json
    - `align.py`、`align_trellis.py`、`align_acoustic.py`、`align_multispeaker.py`、`align_multiperspective.py` 包含大量实测标定的声学阈值与 Numba JIT 边界约束；
    - 仅做最小增量修复，不要为了“代码整洁”主动重构算法核。
 2. **清晰的分层入口**：
-   - `fa_asmr_pipeline.py`：无界面核心管线（编码自动识别、说话人切分、LRC/SRT 组装、`run_pipeline`、`auto_pair_files`）；
-   - `fa_asmr_cli.py`：面向脚本与 Agent 的 CLI（支持 `--mode auto`、`--dry-run`、`--verify-script`、`--json`）；
+   - `fa_asmr_pipeline.py`：无界面核心管线（编码自动识别、注音覆写与词表提取、说话人切分、LRC/SRT 组装、`run_pipeline`、`auto_pair_files`）；
+   - `fa_asmr_cli.py`：面向脚本与 Agent 的 CLI（支持 `--mode auto`、`--dry-run`、`--verify-script`、`--export-ruby`、`--ruby-map`、`--audit` / `--audit-separate`、`--json`）；
+   - `fa_asmr_audit.py`：对齐后声学体检与双视角联合体检引擎（可疑句、未覆盖活跃语音空档、原生采样率合并切片与空间分离联动）；
+   - `fa_asmr_spatial_sep.py`：零依赖双耳立体声 ILD+IPD 空间分离工具（支持 `--start/--end`、`--auto-overlaps`、`--from-audit`）；
    - `FA-ASMR_GUI.py` / `fa_asmr_ui.py`：桌面启动器与暗色音频控制台界面（Obsidian Acoustic Console）；
    - 新增模块若需随 exe 打包，须同步加入 `FA-ASMR.spec` 的 `hiddenimports`。
 3. **改动前后必跑回归测试**：

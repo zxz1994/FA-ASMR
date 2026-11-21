@@ -82,7 +82,7 @@ def _fatal_error(title, detail):
     _log = os.path.join(_d, "FA-ASMR_crash.log")
     try:
         with open(_log, "w", encoding="utf-8") as _f:
-            _f.write("FA-ASMR 启动崩溃日志\n")
+            _f.write(f"{title}\n")
             _f.write("time:   " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
             _f.write("frozen: " + str(getattr(sys, 'frozen', False)) + "\n")
             _f.write("MEIPASS:" + str(getattr(sys, '_MEIPASS', 'None')) + "\n\n")
@@ -93,7 +93,7 @@ def _fatal_error(title, detail):
         import ctypes
         ctypes.windll.user32.MessageBoxW(
             0,
-            "FA-ASMR 启动失败\n\n" + detail[:1800] +
+            f"{title}\n\n" + detail[:1800] +
             "\n\n详细日志已保存到：\n" + _log + "\n\n请把该文件发给开发者以便排查。",
             "FA-ASMR 错误", 0x10)
     except Exception:
@@ -109,8 +109,23 @@ def _excepthook(exc_type, exc_val, exc_tb):
     _fatal_error("FA-ASMR 未捕获异常", _detail)
 
 
+def _thread_excepthook(args):
+    import traceback as _tb
+    tname = getattr(getattr(args, "thread", None), "name", "unknown")
+    try:
+        _detail = (
+            f"Thread: {tname}\n"
+            + "".join(_tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        )
+    except Exception:
+        _detail = f"Thread: {tname}\n{args.exc_value}"
+    _fatal_error("FA-ASMR 后台线程异常", _detail)
+
+
 if "--cli" not in sys.argv:
     sys.excepthook = _excepthook
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _thread_excepthook
 
 import torch_bootstrap
 from torch_bootstrap import ensure_torch

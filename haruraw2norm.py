@@ -6,6 +6,7 @@ np_compat.apply()
 from janome.tokenizer import Tokenizer  # noqa: F401  （仅导入模块；构造器在首次使用时惰性创建）
 import pykakasi
 import re
+import sys
 import logging
 from clause import (
     F,
@@ -82,15 +83,24 @@ def _get_eng_dic():
 # {漢字|かな}，走与显式 ruby 相同的 type=2 路径。已带 {漢字|かな} 的行会被
 # _annotate_mixed 原样保留，纯假名行直接跳过，故可安全对所有 ja/jaen 行调用。
 _ruby_annotator = None
+_ruby_annotator_warned = False
 def _get_ruby_annotator():
-    global _ruby_annotator
+    global _ruby_annotator, _ruby_annotator_warned
     if _ruby_annotator is not None:
-        return _ruby_annotator
+        return _ruby_annotator or None
     try:
         from furigana.fa_asmr_converter import RubyAnnotator
         _ruby_annotator = RubyAnnotator()
-    except Exception:
+    except Exception as e:
         _ruby_annotator = False  # 标记不可用，避免每次调用都重试
+        if not _ruby_annotator_warned:
+            _ruby_annotator_warned = True
+            msg = f"⚠ [haruraw2norm] RubyAnnotator 初始化失败，裸汉字将无法自动振假名: {type(e).__name__}: {e}"
+            logger.warning(msg)
+            try:
+                print(msg, file=sys.stderr)
+            except Exception:
+                pass
     return _ruby_annotator or None
 
 
@@ -999,7 +1009,8 @@ def _fix_ha_he(result):
     if any(is_kanji(c) for c in line_surface):
         try:
             token_phonetic = ''.join([token.phonetic for token in _get_tokenizer().tokenize(line_surface)])
-        except Exception:
+        except Exception as _e:
+            logger.warning('Janome 分词失败，助词 は/へ 读音修正降级为表层串 (%s: %s)', type(_e).__name__, _e)
             token_phonetic = line_surface
         line_kks = _get_kks().convert(token_phonetic)
         line_roma = ''.join([i['hepburn'] for i in line_kks]) if line_kks else ''
@@ -1012,8 +1023,8 @@ def _fix_ha_he(result):
                             result[i]['pron'] = 'wa'
                         elif result[i]['orig'] == 'へ' and line_roma_proc[i] == 'e':
                             result[i]['pron'] = 'e'
-                    except Exception:
-                        logger.warning('Ignored errors when trying to correct ha and he...')
+                    except Exception as _e:
+                        logger.warning('修正助词 は/へ 读音时出错 (%s: %s)', type(_e).__name__, _e)
     return result
 
 
@@ -1109,7 +1120,12 @@ def process_haruhi_line(line, lang='jaen', sokuon_split=False, hatsuon_split=Tru
             try:
                 line = ra.annotate(line, use_yomikata=False)
             except Exception as _e:
-                logger.warning('RubyAnnotator 失败，按原文解析: %r (%s)', line[:40], _e)
+                msg = f"⚠ [haruraw2norm] RubyAnnotator 注音失败，按原文解析: {line[:40]!r} ({type(_e).__name__}: {_e})"
+                logger.warning(msg)
+                try:
+                    print(msg, file=sys.stderr)
+                except Exception:
+                    pass
         result = _parse_ja_tokens(line, lang, sokuon_split, hatsuon_split)
         result = haruhi_eng_pron(result, ja_context=True)
         result = _annotate_pron(result)

@@ -22,7 +22,12 @@ DLL 路径用全局 cookie 持有，防止 GC 回收导致 .pyd 加载失败。"
 import sys
 import os
 import subprocess
-import tkinter.messagebox as messagebox
+
+
+def _get_messagebox():
+    """惰性导入 tkinter.messagebox，避免无 GUI 环境下 CLI 导入本模块时崩在 tkinter。"""
+    import tkinter.messagebox as messagebox
+    return messagebox
 
 # windowed（console=False）冻结模式下 sys.stdout / sys.stderr 为 None。
 # 本模块的 _note() 会向 sys.stderr 写诊断；一旦写入，sys.stderr 便从 None
@@ -239,12 +244,15 @@ def _try_embedded_torch():
         _note(_tb.format_exc())
         return False
 
-    # torchaudio 不是强制对齐所需 (音频走 soundfile), 即使导入失败也允许回退
+    # 强制对齐主链路强依赖 torchaudio (MMS_FA pipeline / load / resample)，不可静默忽略
     try:
         import torchaudio  # noqa: F401
-        _note(f"内置 torch 加载成功: {torch.__version__} (含 torchaudio)")
+        _note(f"内置 torch 加载成功: {torch.__version__} (含 torchaudio {getattr(torchaudio, '__version__', '?')})")
     except Exception as _ta:
-        _note(f"内置 torch 加载成功: {torch.__version__} (torchaudio 不可用, 不影响对齐: {_ta})")
+        _note(f"内置 torchaudio 导入失败（对齐主链路强依赖 torchaudio）: {_ta}")
+        import traceback as _tb
+        _note(_tb.format_exc())
+        return False
     return True
 
 
@@ -279,9 +287,12 @@ def ensure_torch(root_window=None):
                 _note("内置 CUDA 版 torch 已加载，已自动启用 GPU 加速。")
             elif BUILD_VARIANT == 'gpu':
                 if _has_nvidia_gpu():
-                    _note("内置 CUDA 版 torch 已加载，但本机未检测到可用 NVIDIA GPU，已回退 CPU 路径（正常现象）。")
+                    _note(
+                        "⚠ 检测到 NVIDIA 显卡，但内置 CUDA 版 torch 无法启用 GPU（可能显卡驱动版本过旧或 CUDA 初始化失败），"
+                        "已回退 CPU 路径。请升级 NVIDIA 显卡驱动后重试。"
+                    )
                 else:
-                    _note("内置 CUDA 版 torch 已加载（本机无 N 卡，走 CPU 路径，属正常）。")
+                    _note("内置 CUDA 版 torch 已加载（本机未检测到 NVIDIA 显卡，走 CPU 路径，属正常）。")
             else:  # CPU 版
                 if _has_nvidia_gpu():
                     _note("检测到 NVIDIA 显卡，但本版为纯 CPU 版 FA-ASMR，仅使用内置 CPU torch（无 GPU 加速）。如需 GPU 加速，请改用 GPU 版 FA-ASMR。")
@@ -293,7 +304,7 @@ def ensure_torch(root_window=None):
     # ── 3) 最后手段：内置 torch 缺失，弹窗引导联网安装（极少触发）──
     _write_bootstrap_log()  # 落盘诊断, 即使走到弹窗也能拿到失败原因
     if root_window:
-        ok = messagebox.askyesno(
+        ok = _get_messagebox().askyesno(
             "缺少 PyTorch",
             "未找到可用的 PyTorch（内置 torch 缺失）。\n\n"
             "是否联网下载安装？（需要系统 Python 3.10-3.12）"
@@ -303,6 +314,14 @@ def ensure_torch(root_window=None):
 
     if not ok:
         sys.exit(0)
+
+    def _fail(title: str, detail: str):
+        _note(f"{title}: {detail}")
+        _write_bootstrap_log()
+        if root_window:
+            _get_messagebox().showerror(title, detail)
+            sys.exit(1)
+        raise RuntimeError(f"{title}: {detail}")
 
     pythons = []
     for cmd in ('python', 'python3', 'py'):
@@ -318,16 +337,14 @@ def ensure_torch(root_window=None):
             continue
 
     if not pythons:
-        if root_window:
-            messagebox.showerror(
-                "未找到 Python",
-                "未检测到系统 Python，无法自动安装。请使用带内置 torch 的分发版或从源码构筑。"
-            )
-        sys.exit(1)
+        _fail(
+            "未找到 Python",
+            "未找到可用的 PyTorch / torchaudio，且未检测到系统 Python，无法自动安装。请使用带内置 torch 的分发版或手动安装 torch==2.6.0 torchaudio==2.6.0。",
+        )
 
     py_exe = pythons[0]
     if root_window:
-        messagebox.showinfo("正在安装", f"正在使用 {py_exe} 安装 PyTorch...")
+        _get_messagebox().showinfo("正在安装", f"正在使用 {py_exe} 安装 PyTorch...")
 
     ret = subprocess.run(
         [py_exe, '-m', 'pip', 'install', '--user',
@@ -336,16 +353,12 @@ def ensure_torch(root_window=None):
         capture_output=True, text=True,
     )
     if ret.returncode != 0:
-        if root_window:
-            messagebox.showerror("安装失败", f"安装出错：\n{ret.stderr[-600:]}")
-        sys.exit(1)
+        _fail("PyTorch 自动安装失败", f"pip 返回码 {ret.returncode}：\n{ret.stderr[-600:]}")
 
     try:
         import torch
         import torchaudio
         TORCH_DONE = True
         return True
-    except ImportError:
-        if root_window:
-            messagebox.showerror("导入失败", "PyTorch 已安装但仍无法导入，请检查环境。")
-        sys.exit(1)
+    except ImportError as e:
+        _fail("PyTorch 导入失败", f"PyTorch 已安装但仍无法导入 ({e})，请检查环境。")

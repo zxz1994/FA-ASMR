@@ -298,11 +298,11 @@ start "" "{app_name}.exe"
 
     # 10. 压缩为发布资产
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    version_tag = os.environ.get("GITHUB_REF_NAME", "v2.4.0")
+    version_tag = os.environ.get("GITHUB_REF_NAME", "v2.5.0")
     if version_tag.startswith("refs/tags/"):
         version_tag = version_tag.split("/")[-1]
     if not version_tag or version_tag == "main":
-        version_tag = "v2.4.0"
+        version_tag = "v2.5.0"
     pkg_name = f"FA-ASMR-{version_tag}-Windows-{variant.upper()}"
     log(f"正在进行 7-Zip 压缩: {pkg_name} ...")
     t0 = time.time()

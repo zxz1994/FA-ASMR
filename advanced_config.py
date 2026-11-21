@@ -25,6 +25,9 @@ JSON 标准不支持注释，这里做宽松解析：以 // 或 # 开头的整�
 import os
 import sys
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 与 align_model._CPU_CHUNK_CAP 原值一致，作为未配置时的回退
 DEFAULTS = {
@@ -34,6 +37,23 @@ DEFAULTS = {
 }
 
 _CACHE = None
+LAST_WARNINGS = []
+
+
+def _warn(msg):
+    LAST_WARNINGS.append(msg)
+    logger.warning(msg)
+    try:
+        print(f"  ⚠ [advanced_config] {msg}", file=sys.stderr)
+    except Exception:
+        pass
+
+
+def reset_cache():
+    """清空配置缓存与历史告警（供测试或热重载使用）。"""
+    global _CACHE
+    _CACHE = None
+    LAST_WARNINGS.clear()
 
 
 def config_path():
@@ -56,24 +76,51 @@ def _strip_comments(text):
     return "\n".join(out)
 
 
+def _validate_value(key, val):
+    """校验单字段类型与合法范围，返回 (是否合法, 规范化值, 错误说明)。"""
+    if key == "cpu_threads":
+        if isinstance(val, bool) or not isinstance(val, int) or val < 1:
+            return False, None, f"cpu_threads 必须为 >= 1 的整数或 null，收到 {val!r}"
+        return True, val, None
+    if key == "quantize_int8":
+        if not isinstance(val, bool):
+            return False, None, f"quantize_int8 必须为布尔值 (true/false) 或 null，收到 {val!r}"
+        return True, val, None
+    if key == "cpu_chunk_cap":
+        if isinstance(val, bool) or not isinstance(val, int) or val < 100:
+            return False, None, f"cpu_chunk_cap 必须为 >= 100 的整数，收到 {val!r}"
+        return True, val, None
+    return True, val, None
+
+
 def load():
-    """加载配置（带缓存），缺字段回退 DEFAULTS。"""
+    """加载配置（带缓存），缺字段回退 DEFAULTS；格式或字段错误时显式告警。"""
     global _CACHE
     if _CACHE is not None:
         return _CACHE
+    LAST_WARNINGS.clear()
     data = dict(DEFAULTS)
     path = config_path()
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 user = json.loads(_strip_comments(f.read()))
-            if isinstance(user, dict):
+        except Exception as e:
+            _warn(f"读取或解析 {path} 失败 ({type(e).__name__}: {e})，已回退默认配置")
+        else:
+            if not isinstance(user, dict):
+                _warn(f"{path} 根节点必须为 JSON 对象，实际为 {type(user).__name__}，已回退默认配置")
+            else:
+                unknown = [k for k in user if k not in DEFAULTS]
+                if unknown:
+                    _warn(f"{path} 包含未识别的配置键 {unknown}，已忽略（有效键: {list(DEFAULTS.keys())}）")
                 for k in DEFAULTS:
                     if k in user and user[k] is not None:
-                        data[k] = user[k]
-        except Exception:
-            # 解析失败静默回退默认值，不影响主流程
-            pass
+                        ok, norm_val, err_msg = _validate_value(k, user[k])
+                        if ok:
+                            data[k] = norm_val
+                        else:
+                            _warn(f"{path} 配置项 {err_msg}，已回退默认值 {DEFAULTS[k]!r}")
     _CACHE = data
     return data
 

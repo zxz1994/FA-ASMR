@@ -24,6 +24,7 @@ FA-ASMR_GUI.py：在「发音 token 拿到真实时间（result_list[idx]['start
 """
 from __future__ import annotations
 
+import sys
 import clause
 from clause import F
 
@@ -105,16 +106,19 @@ def _is_ono_span(result_list, start_idx: int, end_idx: int = None) -> bool:
         return False
     try:
         from ono_filter import is_easy_ono
-        return is_easy_ono("".join(toks))
-    except Exception as e:
+    except ImportError as e:
         # 降级为「非拟声」会让类型边界切分失效（台词/呻吟不再强制分行），
         # 但结果不会异常 —— 故必须打印一次告警，避免机制静默失效。
         global _ONO_IMPORT_WARNED
         if not _ONO_IMPORT_WARNED:
             _ONO_IMPORT_WARNED = True
-            print(f"  ⚠ [resegment] 易错拟声判定不可用（{type(e).__name__}: {e}），"
-                  "已降级为「一律非拟声」——类型边界切分失效。")
+            print(
+                f"  ⚠ [resegment] 易错拟声判定不可用（{type(e).__name__}: {e}），"
+                "已降级为「一律非拟声」——类型边界切分失效。",
+                file=sys.stderr,
+            )
         return False
+    return is_easy_ono("".join(toks))
 
 
 def apply_punctuation_resegment(

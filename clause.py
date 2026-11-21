@@ -55,7 +55,10 @@ type=3 且 pron 为空的 ``っ``（形如 ``...って、答は``）是唯一的
 from __future__ import annotations
 
 import re
+import sys
 from typing import Any, Dict, List, Sequence, Tuple
+
+_ONO_IMPORT_WARNED = False
 
 # ── result_list 扩展字段名（全项目单一事实源）─────────────────────────────
 #
@@ -238,9 +241,17 @@ def mark_short_comma_bridges(
       2) 左侧为 1~2 字口吃前缀且右侧实词读音以其开头（如 ``ぃ、行ってらっしゃいませ``、``ち、ちが``）；
       3) 左侧为 <=2 字实词且右侧为 <=3 字词尾（如 ``うる、さいっ``、``やめ、てっ``）。
     """
+    global _ONO_IMPORT_WARNED
     try:
         from ono_filter import is_easy_ono as _is_easy_ono
-    except Exception:
+    except ImportError as e:
+        if not _ONO_IMPORT_WARNED:
+            _ONO_IMPORT_WARNED = True
+            print(
+                f"  ⚠ [clause] 易错拟声判定不可用（{type(e).__name__}: {e}），"
+                "短句顿号桥接已跳过。",
+                file=sys.stderr,
+            )
         return 0
 
     for it in result_list:

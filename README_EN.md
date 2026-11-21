@@ -1,4 +1,4 @@
-# FA-ASMR (`v2.4.0`)
+# FA-ASMR (`v2.5.0`)
 
 **English** | [简体中文](README.md) | [Agent Guide (AGENTS.md)](AGENTS.md)
 
@@ -32,10 +32,10 @@ In Japanese ASMR and voice drama subtitling where official scripts are available
 
 No Python or PyTorch setup required—includes the 1.26 GB MMS-FA base model, yomikata dBert weights, and ASMR LoRA adapter out of the box:
 
-* **Windows CPU Edition** (all PCs): Download `FA-ASMR-v2.4.0-Windows-CPU.zip`, extract, and double-click `运行FA-ASMR.bat`.
-* **Windows CUDA GPU Edition** (NVIDIA GPUs, 4 GB+ VRAM): Download all split volumes (`FA-ASMR-v2.4.0-Windows-GPU.zip.001`, etc.) and `merge_split_gpu_zip.bat` into the same folder, run the merge script, extract, and launch `运行FA-ASMR.bat`.
+* **Windows CPU Edition** (all PCs): Download `FA-ASMR-v2.5.0-Windows-CPU.zip`, extract, and double-click `运行FA-ASMR.bat`.
+* **Windows CUDA GPU Edition** (NVIDIA GPUs, 4 GB+ VRAM): Download all split volumes (`FA-ASMR-v2.5.0-Windows-GPU.zip.001`, etc.) and `merge_split_gpu_zip.bat` into the same folder, run the merge script, extract, and launch `运行FA-ASMR.bat`.
 
-> Download: [GitHub Releases (v2.4.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
+> Download: [GitHub Releases (v2.5.0)](https://github.com/zxz1994/FA-ASMR/releases/latest)
 
 ### 2.2 Run from Source (Developers / CLI / AI Agents)
 

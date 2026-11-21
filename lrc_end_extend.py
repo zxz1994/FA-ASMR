@@ -118,12 +118,19 @@ def main():
     ap.add_argument("-e", "--extend", type=float, default=1.0, help="延长秒数 (默认 1.0)")
     args = ap.parse_args()
 
+    if args.extend < 0:
+        print(f"[错误] 延长秒数不能为负数: {args.extend}", file=sys.stderr)
+        sys.exit(2)
+
     if not os.path.isfile(args.input):
-        print(f"[错误] 找不到文件: {args.input}")
+        print(f"[错误] 找不到文件: {args.input}", file=sys.stderr)
         sys.exit(1)
 
     with open(args.input, encoding="utf-8") as f:
         text = f.read()
+
+    if not _TS.search(text):
+        print(f"[警告] 输入文件中未检测到任何有效 LRC 时间戳: {args.input}", file=sys.stderr)
 
     out, n = extend_lrc(text, args.extend)
 

@@ -816,6 +816,19 @@ def build_ui(ctx):
         (multi_persp_var, "multi_persp", lambda v: v in (True, "true", "True", 1, "1")),
     ]
 
+    _startup_warnings: list[str] = []
+    _ui_log_sink = [None]
+
+    def _warn_ui(msg: str):
+        try:
+            print(f"[FA-ASMR UI] ⚠ {msg}", file=sys.stderr)
+        except Exception:
+            pass
+        if _ui_log_sink[0] is not None:
+            _ui_log_sink[0](f"⚠ {msg}")
+        else:
+            _startup_warnings.append(msg)
+
     def _save_settings():
         try:
             cur = mode_var.get()
@@ -823,8 +836,8 @@ def build_ui(ctx):
             multi_persp_var.set(cur == "multi_persp")
             with open(ctx.settings_file, "w", encoding="utf-8") as f:
                 json.dump({k: v.get() for v, k, _ in _var_meta}, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            _warn_ui(f"保存设置文件失败 ({ctx.settings_file}): {type(e).__name__}: {e}")
 
     def _load_settings():
         if not os.path.isfile(ctx.settings_file):
@@ -835,6 +848,8 @@ def build_ui(ctx):
         try:
             with open(ctx.settings_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError(f"设置文件根节点不是 JSON 对象: {type(data).__name__}")
             for var, key, conv in _var_meta:
                 if key in data:
                     var.set(conv(data[key]))
@@ -846,8 +861,8 @@ def build_ui(ctx):
             if "align_mode" not in data:
                 mode_var.set("multi_persp" if data.get("multi_persp") else
                              "multi_speaker" if data.get("multi_order") else "single")
-        except Exception:
-            pass
+        except Exception as e:
+            _warn_ui(f"读取设置文件失败 ({ctx.settings_file}): {type(e).__name__}: {e}，已回退默认设置")
 
     _load_settings()
 
@@ -1282,6 +1297,12 @@ def build_ui(ctx):
             log_visible.set(True)
         _refresh_console_btn()
 
+    def _ensure_console_open():
+        if not log_visible.get():
+            console_drawer.pack(fill=tk.X, before=transport_sep)
+            log_visible.set(True)
+            _refresh_console_btn()
+
     def _refresh_console_btn():
         active = log_visible.get()
         sym = "▾" if active else "▸"
@@ -1311,6 +1332,11 @@ def build_ui(ctx):
                 log_text.insert(tk.END, line)
             log_text.see(tk.END)
         _post_ui(_insert)
+
+    _ui_log_sink[0] = append_log
+    for _sw in _startup_warnings:
+        append_log(f"⚠ {_sw}")
+    _startup_warnings.clear()
 
     # ── 2.5 底部走带控制栏 (Studio Transport Deck) ───────────────────────
     transport_sep = tk.Frame(stage, bg=BORDER, height=1)
@@ -2048,7 +2074,25 @@ def build_ui(ctx):
                         incomplete_files.append(t[k])
 
         new_files = [os.path.abspath(f) for f in files if f and str(f).strip()]
-        all_candidates = list(dict.fromkeys(pool_files + incomplete_files + new_files))
+        _supported_exts = {".txt", ".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".opus", ".wma"}
+        unsupported = []
+        missing_inputs = []
+        valid_new = []
+        for f in new_files:
+            if not os.path.exists(f):
+                missing_inputs.append(os.path.basename(f) or f)
+                continue
+            ext = os.path.splitext(f)[1].lower()
+            if os.path.isdir(f) or ext not in _supported_exts or f.lower().endswith(".dropped.txt"):
+                unsupported.append(os.path.basename(f) or f)
+            else:
+                valid_new.append(f)
+        if missing_inputs:
+            append_log(f"⚠ 忽略不存在的文件 ({len(missing_inputs)}): {', '.join(missing_inputs[:5])}")
+        if unsupported:
+            append_log(f"⚠ 忽略不支持的格式 ({len(unsupported)}): {', '.join(unsupported[:5])}")
+
+        all_candidates = list(dict.fromkeys(pool_files + incomplete_files + valid_new))
         pairs, unmatched = ctx.auto_pair_files(all_candidates, mode=mode_var.get())
         added = 0
 
@@ -2133,6 +2177,10 @@ def build_ui(ctx):
         if added:
             _set_led(ACCENT_HOVER)
             update_status(tr("status_added_files", added=added, total=len(_task_store)))
+        elif (unsupported or missing_inputs) and not valid_new:
+            _set_led(AMBER)
+            _ensure_console_open()
+            update_status(f"未导入：发现 {len(unsupported) + len(missing_inputs)} 个不支持或不存在的文件")
         else:
             update_status(tr("status_files_already"))
 
@@ -2176,7 +2224,8 @@ def build_ui(ctx):
                 path = str(item).strip().strip('"').strip("'")
                 if path:
                     paths.append(os.path.abspath(path))
-        except Exception:
+        except Exception as e:
+            append_log(f"⚠ 拖拽路径解析异常 ({type(e).__name__}: {e})，已回退为空格切分（含空格路径可能受影响）")
             paths = [os.path.abspath(p) for p in event.data.split() if p.strip()]
         _add_files_to_list(paths)
 
@@ -2195,13 +2244,33 @@ def build_ui(ctx):
                        bd=1, relief=tk.SOLID, font=(FONT, 9))
 
         def _open_file(path):
-            if path and os.path.exists(path):
+            if not path or not os.path.exists(path):
+                messagebox.showwarning(
+                    "文件不存在",
+                    f"目标文件不存在或已被移动：\n{path or '(未指定)'}",
+                    parent=root,
+                )
+                return
+            try:
                 os.startfile(os.path.normpath(path))
+            except Exception as e:
+                append_log(f"打开文件失败 ({path}): {type(e).__name__}: {e}")
+                messagebox.showerror("打开失败", f"无法打开文件：\n{path}\n\n{type(e).__name__}: {e}", parent=root)
 
         def _open_folder():
             target = item.get("audio") or item.get("script")
-            if target and os.path.exists(target):
-                subprocess.run(["explorer", "/select,", os.path.normpath(target)])
+            if not target or not os.path.exists(target):
+                messagebox.showwarning(
+                    "路径不存在",
+                    f"目标文件不存在或已被移动：\n{target or '(未指定)'}",
+                    parent=root,
+                )
+                return
+            try:
+                subprocess.run(["explorer", "/select,", os.path.normpath(target)], check=False)
+            except Exception as e:
+                append_log(f"打开文件夹失败 ({target}): {type(e).__name__}: {e}")
+                messagebox.showerror("打开失败", f"无法定位文件夹：\n{target}\n\n{type(e).__name__}: {e}", parent=root)
 
         def _view_output(ext: str):
             audio = item.get("audio")
@@ -2253,11 +2322,25 @@ def build_ui(ctx):
             for ext in (".srt", ".lrc"):
                 out_path = os.path.splitext(audio)[0] + ext
                 if os.path.exists(out_path):
-                    os.startfile(os.path.normpath(out_path))
+                    try:
+                        os.startfile(os.path.normpath(out_path))
+                    except Exception as e:
+                        append_log(f"打开字幕失败 ({out_path}): {type(e).__name__}: {e}")
+                        messagebox.showerror("打开失败", f"无法打开字幕：\n{out_path}\n\n{type(e).__name__}: {e}", parent=root)
                     return
         target = audio or item.get("script")
         if target and os.path.exists(target):
-            subprocess.run(["explorer", "/select,", os.path.normpath(target)])
+            try:
+                subprocess.run(["explorer", "/select,", os.path.normpath(target)], check=False)
+            except Exception as e:
+                append_log(f"打开文件夹失败 ({target}): {type(e).__name__}: {e}")
+                messagebox.showerror("打开失败", f"无法定位文件：\n{target}\n\n{type(e).__name__}: {e}", parent=root)
+        else:
+            messagebox.showwarning(
+                "文件不存在",
+                f"目标文件不存在或已被移动：\n{target or '(未指定)'}",
+                parent=root,
+            )
 
     # ══════════════════════════════════════════════════════════════════════
     #  模式切换与多语言全量热更新
@@ -2381,7 +2464,9 @@ def build_ui(ctx):
         append_log(f"\n[RUN] {tr(f'mode_{current}_title')} · {dev_var.get().upper()} · {len(valid)} track(s)")
 
         def _worker():
+            import traceback as _tb
             succeeded, failed = 0, 0
+            failed_details: list[str] = []
             total = len(valid)
             try:
                 for idx, item in enumerate(valid):
@@ -2408,15 +2493,37 @@ def build_ui(ctx):
                         succeeded += 1
                     else:
                         failed += 1
-                        append_log(f"处理失败：{error}")
+                        err_text = error or "未知错误（请查看终端日志）"
+                        failed_details.append(f"• {item['name']}: {err_text}")
+                        append_log(f"处理失败：{err_text}")
+                        _post_ui(_ensure_console_open)
                 _post_ui(lambda: _set_led(EMERALD if failed == 0 else AMBER))
                 _set_progress(100, tr("status_all_done", succeeded=succeeded, failed=failed))
                 append_log(f"✓ 批量任务完成：成功 {succeeded}，失败 {failed}")
+                if failed > 0:
+                    preview = "\n".join(failed_details[:6])
+                    if len(failed_details) > 6:
+                        preview += f"\n…（其余 {len(failed_details) - 6} 项请查看下方终端日志）"
+                    _post_ui(lambda p=preview, s=succeeded, f=failed: (
+                        _ensure_console_open(),
+                        messagebox.showerror(
+                            "部分或全部任务失败",
+                            f"成功 {s} 项，失败 {f} 项：\n\n{p}\n\n详细报错与堆栈已展开至下方终端日志。",
+                            parent=root,
+                        ),
+                    ))
             except Exception as err:
                 failed += 1
-                _post_ui(lambda: _set_led(CRIMSON))
-                append_log(f"任务中断：{type(err).__name__}: {err}")
-                _set_progress(0, tr("status_interrupted", error=err))
+                tb_str = _tb.format_exc()
+                err_desc = f"{type(err).__name__}: {err}" if str(err) else type(err).__name__
+                _post_ui(lambda: (_set_led(CRIMSON), _ensure_console_open()))
+                append_log(f"任务中断：{err_desc}\n{tb_str}")
+                _set_progress(0, tr("status_interrupted", error=err_desc))
+                _post_ui(lambda d=err_desc: messagebox.showerror(
+                    "任务异常中断",
+                    f"执行过程中发生未预期异常：\n\n{d}\n\n完整堆栈已输出至下方终端日志。",
+                    parent=root,
+                ))
             finally:
                 try:
                     ctx.release_gpu()

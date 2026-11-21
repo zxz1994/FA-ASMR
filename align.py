@@ -114,7 +114,8 @@ def align_audio_with_text(
         raw_L, raw_R = precomputed_emission
     else:
         raw_L, raw_R = compute_emission(
-            waveform, sample_rate, device=device, lora_path=resolved_lora, chunk_frames=chunk_frames
+            waveform, sample_rate, device=device, lora_path=resolved_lora,
+            chunk_frames=chunk_frames, log_callback=log_callback,
         )
 
     emission_L = torch.log_softmax(raw_L.float(), dim=-1)
@@ -286,6 +287,13 @@ def align_audio_with_text(
         diag["mono_rms_db"] = mono_rms
         diag["mono_noise_floor_db"] = float(mono_floor)
         diag["frame_sec"] = float(FRAME_SEC)
+        _em_np = emission_for_align.numpy()
+        _valid_c = [c for c in range(_em_np.shape[1]) if c != blank and c not in ignored_classes]
+        diag["ctc_nb_active"] = (
+            (np.max(_em_np[:, _valid_c], axis=1) > (_em_np[:, blank] - np.float32(0.5)))
+            if _valid_c else np.zeros(_em_np.shape[0], dtype=bool)
+        )
+        diag["duration_sec"] = float(_em_np.shape[0] * FRAME_SEC)
 
     return results
 

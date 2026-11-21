@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import copy
 from concurrent.futures import ThreadPoolExecutor
+import logging
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -28,12 +30,20 @@ import numpy as np
 import torch
 import torchaudio
 
+logger = logging.getLogger(__name__)
+
 try:
     import numba as _nb
     _HAS_NUMBA = True
-except Exception:
+except Exception as _nb_err:
     _nb = None
     _HAS_NUMBA = False
+    _nb_msg = f"  ⚠ [align_multiperspective] Numba 不可用 ({type(_nb_err).__name__}: {_nb_err})，已降级为纯 Python 执行（速度将明显下降）"
+    logger.warning(_nb_msg)
+    try:
+        print(_nb_msg, file=sys.stderr)
+    except Exception:
+        pass
 
 from align_acoustic import FRAME_SEC
 from align_utils import _format_time
@@ -75,10 +85,12 @@ def _norm_spk(raw_sp: Any) -> str:
     return s if s else "UNK"
 
 
-def _load_audio_16k_once(audio_file_path: str | Path) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
+def _load_audio_16k_once(audio_file_path: str | Path) -> Tuple[torch.Tensor, np.ndarray]:
     """Load and resample audio once into 16kHz tensor (for MMS-FA) and (2, N) float32 numpy (for STFT)."""
     try:
         wav, sr = torchaudio.load(str(audio_file_path))
+        if wav.numel() == 0 or wav.shape[-1] == 0:
+            raise ValueError("音频波形为空（0 采样）")
         if wav.ndim == 1:
             wav = wav.unsqueeze(0)
         elif wav.shape[0] > 2:
@@ -88,8 +100,10 @@ def _load_audio_16k_once(audio_file_path: str | Path) -> Tuple[Optional[torch.Te
         wav = wav.float()
         stereo_wav = wav.repeat(2, 1) if wav.shape[0] == 1 else wav
         return wav, stereo_wav.detach().cpu().numpy().astype(np.float32)
-    except Exception:
-        return None, None
+    except Exception as e:
+        raise RuntimeError(
+            f"加载双视角音频失败 ({audio_file_path}): {type(e).__name__}: {e}"
+        ) from e
 
 
 def _load_stereo_16k(audio_file_path: str | Path) -> Optional[np.ndarray]:
@@ -1784,6 +1798,16 @@ def run_multiperspective_pipeline(
     else:
         delta_sec = 0.0
 
+    def _calc_nb_active(c_np: np.ndarray, ctx: Dict[str, Any]) -> Optional[np.ndarray]:
+        if c_np.ndim != 2 or c_np.shape[1] <= 1:
+            return None
+        b_id = int(ctx.get("blank", 0))
+        ign = set(ctx.get("ignored_classes", ()))
+        v_cls = [c for c in range(c_np.shape[1]) if c != b_id and c not in ign]
+        if not v_cls:
+            return np.zeros(c_np.shape[0], dtype=bool)
+        return (np.max(c_np[:, v_cls], axis=1) > (c_np[:, b_id] - np.float32(0.5)))
+
     log(f"  ✅ 多视角核心计算完成 (耗时 {time.time() - t_pipe0:.1f}s)")
     mp_meta: Dict[str, Any] = {
         "flat_A": flat_by_side["A"],
@@ -1797,6 +1821,9 @@ def run_multiperspective_pipeline(
         "spk_persp_pref": spk_persp_pref,
         "spk_stats": spk_stats,
         "probe_streams": streams,
+        "frame_sec": float(FRAME_SEC),
+        "ctc_nb_active_A": _calc_nb_active(coop_A_np, ctx_A),
+        "ctc_nb_active_B": _calc_nb_active(coop_B_np, ctx_B),
     }
     return flat_by_side["A"], streams, mp_meta
 
