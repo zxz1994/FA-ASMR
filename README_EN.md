@@ -21,7 +21,11 @@ In Japanese ASMR and voice drama subtitling where official scripts are available
 * **Built-In Onomatopoeia Gate & Smart Segmentation (`ono_filter` / `resegment` / `merge_short`)**:
   * Filters timing-breaking pure kissing/licking/swallowing/breath-only lines while protecting mid-sentence vocalizations and elongated real words (e.g., `ろぉ～く`, `い～～ち`);
   * Automatically segments on acoustic pauses and punctuation, bridges short comma-separated words, and merges overly fragmented clauses so output subtitles are immediately watchable and translation-ready.
-* **Obsidian Acoustic Console Desktop UI**: Dark studio console frontend featuring Windows High-DPI awareness, drag-and-drop track pairing/swapping, instant 3-mode switching, and live Chinese / Japanese / English UI hot-switching.
+* **Obsidian Acoustic Console Desktop UI (100% Standalone — No AI Agent Required)**: Dark studio console frontend featuring Windows High-DPI awareness, drag-and-drop track pairing/swapping, instant 3-mode switching, and live Chinese / Japanese / English UI hot-switching. Regular users can simply launch the app and align tracks completely offline with zero AI Agent or LLM setup.
+* **Offline Precision Audit Loop (New in `v2.5.0`)**:
+  * **Single-Pass Tiered Ruby Glossary & Overrides (`--export-ruby` / `--ruby-map`)**: Loads the model once per directory to export a collocation-deduped glossary with high-risk polyphones, affix-split single kanji (e.g., `お母様`), and speaker names prioritized at the top; supports `global` and `by_file -> by_line` overrides without splitting compounds;
+  * **Post-Alignment Acoustic Audit Radar (`fa_asmr_audit.py` / `--audit`)**: Zero extra inference overhead; flags unaligned active speech gaps (missing lines / VA ad-libs), unrecorded/cut lines, and multi-speaker isolated short-word early pulls (`isolated_speaker_jump`), aggregated into `priority_review` with selective high-priority WAV clipping;
+  * **Zero-Dependency Binaural Spatial Separation (`fa_asmr_spatial_sep.py` / `--audit-separate`)**: Pure `numpy`/`scipy` ILD+IPD soft-masking splits genuine multi-speaker overlaps into clean L/C/R WAV stems at native sample rate (automatically skipped on single-speaker tracks; also works standalone for scriptless multi-VA recordings).
 * **Auto Encoding Detection & Low VRAM Footprint**: Automatically detects UTF-8, UTF-8-BOM, Shift-JIS (CP932), GB18030, and UTF-16 without manual transcoding; runs CUDA FP16 with a fixed optimal `3000`-frame chunk (`~3.74 GB` peak VRAM, 4 GB+ GPUs supported) and CPU INT8 dynamic quantization.
 
 ---
@@ -70,24 +74,25 @@ pip install --no-deps yomikata
 
 ---
 
-## 3. AI Agent & CLI Automation
+## 3. AI Agent & CLI Automation (Optional End-to-End Workflow)
 
-**FA-ASMR intentionally embeds zero LLM API keys or network calls**, keeping the acoustic core 100% offline and deterministic. For full end-to-end automation (*raw PDF/DOCX script extraction → forced alignment → DLsite background research & localized subtitle translation*), pair this repo with your preferred **AI Agent** (Antigravity, Claude Code, Codex, Cursor, Gemini CLI, etc.).
+**FA-ASMR runs 100% standalone without any AI Agent, LLM API keys, or network access**—both the desktop GUI and CLI work completely offline out of the box.
 
-The repository ships with a dedicated [`AGENTS.md`](AGENTS.md) operating guide and a headless CLI ([`fa_asmr_cli.py`](fa_asmr_cli.py)).
+When you want full end-to-end automation (*raw PDF/DOCX extraction → ruby audit → forced alignment & acoustic verification → localized subtitle translation*), pair this repo with your preferred **AI Agent** (Antigravity, Claude Code, Codex, Cursor, Gemini CLI, etc.). The repository ships with a dedicated [`AGENTS.md`](AGENTS.md) operating guide, headless CLI ([`fa_asmr_cli.py`](fa_asmr_cli.py)), and compact translation helper ([`tools/compact_subs.py`](tools/compact_subs.py)).
 
 ### 3.1 Handing the Workflow to an AI Agent
 
-Point any terminal-capable AI Agent to this repository and your target work folder with a prompt like:
+Point any terminal-capable (and multimodal audio-capable) AI Agent to this repository and your target work folder with a prompt like:
 
-> "Read `E:\FA-ASMR\AGENTS.md` and process `./RJ01234567` end-to-end: extract and clean the script, align with `fa_asmr_cli.py`, research the work's background/characters, and translate the aligned subtitles."
+> "Read `E:\FA-ASMR\AGENTS.md` and process `./RJ01234567` end-to-end: clean the script, audit the batch ruby glossary, align and verify high-priority audit clips with `fa_asmr_cli.py` until the Japanese timelines are finalized, then research the work's background and translate in compact format."
 
-Following [`AGENTS.md`](AGENTS.md), the Agent will:
-1. Extract and clean raw vertical/color-coded PDFs or text scripts and standardize `〖Speaker〗` markers;
-2. Semantically select single / multi-speaker / true multi-perspective mode, run `--dry-run` / `--verify-script` pre-checks, and execute `fa_asmr_cli.py --json`;
-3. Look up the work's background and character personas (e.g., via DLsite RJ code) and translate line-by-line directly on top of the engine's accurate timelines.
+Following [`AGENTS.md`](AGENTS.md), the Agent runs a streamlined, zero-rework loop (**always finalizing Japanese timelines before starting translation**):
+1. **Script Extraction & Cleanup**: Extracts vertical/multi-tier/color-coded PDFs, strips stage/SE notes, and normalizes `〖Speaker〗` markers;
+2. **Single-Pass Batch Ruby Review**: Runs `--batch --export-ruby` to export one collocation-deduped, risk-tiered glossary across all tracks and writes only verified misreadings into `ruby_fixes.json` (`global` + `by_file -> by_line`);
+3. **Alignment + Tiered Audit + Multimodal Listening**: Runs `--batch --audit-separate` (auto-skipping spatial separation on single-speaker tracks while splitting true overlaps on multi-speaker tracks), listens to `priority_review` WAV clips (gaps, cut lines, `isolated_speaker_jump` early pulls), and uses `--only` to partially re-align modified tracks;
+4. **Background Research & Compact Translation**: Builds a concise character/glossary card (e.g., via DLsite RJ code), strips timestamps with `tools/compact_subs.py export` (~35%–40% input token savings), translates line-by-line, and rebuilds/verifies `.srt` + `.lrc` with 1:1 timestamp parity and zero kana leaks.
 
-### 3.2 `fa_asmr_cli.py` Usage
+### 3.2 `fa_asmr_cli.py` & Companion CLI Usage
 
 Default `--mode auto` automatically selects `multi_persp` when `--audio-b` or dual-POV pairs are detected, `multi_speaker` when ≥2 speakers are present in the script, and `single` otherwise:
 
@@ -95,17 +100,26 @@ Default `--mode auto` automatically selects `multi_persp` when `--audio-b` or du
 # 1. Fast folder pairing & encoding pre-flight check (no model loaded)
 python fa_asmr_cli.py --batch ./work_dir --dry-run --json
 
-# 2. Deep single-script verification (runs AutoRuby, speaker normalization & clause stats)
-python fa_asmr_cli.py --verify-script ./01.txt --json
+# 2. Single-pass merged & risk-tiered ruby glossary across all scripts in a folder
+python fa_asmr_cli.py --batch ./work_dir --export-ruby --json-out ./ruby_batch.json
 
-# 3. Single-track alignment (JSON summary on stdout; progress logs on stderr)
+# 3. Batch alignment + acoustic audit + selective priority WAV clips (reuses VRAM; auto-separates multi-speaker overlaps)
+python fa_asmr_cli.py --batch ./work_dir --ruby-map ./ruby_fixes.json --audit-separate --audit-out ./audit_batch.json --audit-clips-dir ./audit_clips --json
+
+# 4. Partial rerun for modified tracks only (still reuses a single model load)
+python fa_asmr_cli.py --batch ./work_dir --only 05,07,13 --ruby-map ./ruby_fixes.json --audit-separate --audit-out ./audit_realign.json --audit-clips-dir ./audit_clips_realign --json
+
+# 5. Single-track / dual-perspective joint alignment
 python fa_asmr_cli.py --audio ./01.flac --script ./01.txt --extend 1.0 --json
+python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt --audit-separate --json
 
-# 4. Dual-perspective joint alignment
-python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt --json
+# 6. Standalone zero-dependency binaural spatial separation (scriptless overlap scanning)
+python fa_asmr_spatial_sep.py --audio ./02.flac --auto-overlaps --sources 3 --out-dir ./sep_out --json
 
-# 5. Batch directory alignment (reuses GPU memory across tracks, releases on exit)
-python fa_asmr_cli.py --batch ./work_dir --json
+# 7. Compact translation export / rebuild / 1:1 parity verification
+python tools/compact_subs.py export --jp-dir ./subs_jp --out ./compact_jp.json
+python tools/compact_subs.py build  --jp-dir ./subs_jp --cn-dir ./subs_cn --in-json ./zh_batch.json
+python tools/compact_subs.py verify --jp-dir ./subs_jp --cn-dir ./subs_cn
 ```
 
 > **Pre-built `.exe` users**: Headless CLI is also available via `FA-ASMR.exe --cli ... --json-out summary.json` (use `--json-out` in windowed builds where console stdout is suppressed).
@@ -132,8 +146,11 @@ python fa_asmr_cli.py --batch ./work_dir --json
 ```text
 FA-ASMR/
 ├── AGENTS.md                   # End-to-end AI Agent operating & maintenance guide
-├── fa_asmr_cli.py              # Headless CLI (--mode auto / --dry-run / --verify-script / --json)
-├── fa_asmr_pipeline.py         # Non-GUI core pipeline, encoding detection, LRC/SRT & auto-pairing
+├── fa_asmr_cli.py              # Headless CLI (--mode auto / --export-ruby / --ruby-map / --audit-separate / --only / --json)
+├── fa_asmr_pipeline.py         # Non-GUI core pipeline, encoding detection, tiered ruby glossary, LRC/SRT & auto-pairing
+├── fa_asmr_audit.py            # Post-alignment acoustic audit, dual-POV joint audit, speaker-jump & priority WAV clipping
+├── fa_asmr_spatial_sep.py      # Zero-dependency binaural ILD+IPD spatial separator (standalone & audit-linked)
+├── tools/compact_subs.py       # Compact translation export / .srt+.lrc rebuild / 1:1 parity verifier
 ├── FA-ASMR_GUI.py              # Desktop launcher, --cli router & --self-test verification
 ├── fa_asmr_ui.py               # Obsidian Acoustic Console dark studio UI
 ├── fa_asmr_i18n.py             # ZH / JA / EN hot-switchable localization
