@@ -232,7 +232,7 @@ class InlineLeakCleaner:
 
     def _tails(self, reading: str) -> Set[str]:
         """读音去掉首音节后的剩余（含长音展开变体）。"""
-        from haruraw2norm import sylla_split
+        from fa_asmr.text.haruraw2norm import sylla_split
         out: Set[str] = set()
         for r in (reading, self.ra._expand_macron(reading)):
             syls = sylla_split(r, False, True)

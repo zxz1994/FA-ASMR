@@ -49,7 +49,7 @@ if sys.stderr is not None and hasattr(sys.stderr, "reconfigure"):
 
 # NumPy 2.x 移除的别名补齐（原为三处重复副本之一，已统一到 np_compat）。
 # 必须在导入期执行，且早于任何依赖它的包。
-import np_compat
+import fa_asmr.core.np_compat as np_compat
 np_compat.apply()
 
 if getattr(sys, 'frozen', False):
@@ -94,8 +94,9 @@ def _fatal_error(title, detail):
         ctypes.windll.user32.MessageBoxW(
             0,
             f"{title}\n\n" + detail[:1800] +
-            "\n\n详细日志已保存到：\n" + _log + "\n\n请把该文件发给开发者以便排查。",
-            "FA-ASMR 错误", 0x10)
+            "\n\n详细日志已保存到 / Log saved to:\n" + _log +
+            "\n\n请把该文件发给开发者以便排查。\nPlease send this file to the developer for troubleshooting.",
+            "FA-ASMR 错误 / Error", 0x10)
     except Exception:
         pass
 
@@ -106,7 +107,7 @@ def _excepthook(exc_type, exc_val, exc_tb):
         _detail = "".join(_tb.format_exception(exc_type, exc_val, exc_tb))
     except Exception:
         _detail = "{}".format(exc_val)
-    _fatal_error("FA-ASMR 未捕获异常", _detail)
+    _fatal_error("FA-ASMR 未捕获异常 / Unhandled Exception", _detail)
 
 
 def _thread_excepthook(args):
@@ -119,7 +120,7 @@ def _thread_excepthook(args):
         )
     except Exception:
         _detail = f"Thread: {tname}\n{args.exc_value}"
-    _fatal_error("FA-ASMR 后台线程异常", _detail)
+    _fatal_error("FA-ASMR 后台线程异常 / Background Thread Exception", _detail)
 
 
 if "--cli" not in sys.argv:
@@ -127,8 +128,8 @@ if "--cli" not in sys.argv:
     if hasattr(threading, "excepthook"):
         threading.excepthook = _thread_excepthook
 
-import torch_bootstrap
-from torch_bootstrap import ensure_torch
+import fa_asmr.core.torch_bootstrap as torch_bootstrap
+from fa_asmr.core.torch_bootstrap import ensure_torch
 
 ensure_torch(None)
 
@@ -151,13 +152,13 @@ try:
 except ImportError:
     HAS_PIL = False
 
-import align
-import align_utils as au
-import haruraw2norm as hn
-from clause import F, is_text_token as _is_text_token
+import fa_asmr.aligners.align as align
+import fa_asmr.aligners.align_utils as au
+import fa_asmr.text.haruraw2norm as hn
+from fa_asmr.text.clause import F, is_text_token as _is_text_token
 
 # ── 从无界面核心管线模块导入并保持完整向后兼容导出 ──────────────────────────
-from fa_asmr_pipeline import (
+from fa_asmr.pipeline.runner import (
     AUDIO_EXTS,
     _SPEAKER_BRACKET_RE,
     _SPEAKER_SEP,
@@ -188,7 +189,7 @@ from fa_asmr_pipeline import (
 def build_gui():
     """创建界面并接入现有对齐管线，保持打包与源码启动路径一致。"""
     from types import SimpleNamespace
-    from fa_asmr_ui import build_ui, enable_windows_dpi_awareness
+    from fa_asmr.ui.console import build_ui, enable_windows_dpi_awareness
 
     # 必须在创建 Tk 根窗口之前启用高分屏 DPI 感知，否则 4K 屏下会被系统位图拉伸发糊
     enable_windows_dpi_awareness()
@@ -303,13 +304,26 @@ def _run_self_test() -> int:
 
     def _align_engine():
         import torch
-        import align
-        import align_multispeaker  # noqa: F401
-        import align_multiperspective  # noqa: F401
-        import fa_asmr_pipeline  # noqa: F401
+        import fa_asmr.aligners.align as align
+        import fa_asmr.aligners.multispeaker as align_multispeaker  # noqa: F401
+        import fa_asmr.aligners.multiperspective as align_multiperspective  # noqa: F401
+        import fa_asmr.pipeline.runner as fa_asmr_pipeline  # noqa: F401
+        import fa_asmr.pipeline.ruby  # noqa: F401
+        import fa_asmr.pipeline.pairing  # noqa: F401
+        import fa_asmr.pipeline.subtitles  # noqa: F401
+        import fa_asmr.ui.console as fa_asmr_ui  # noqa: F401
+        import fa_asmr.ui.widgets  # noqa: F401
+        import fa_asmr.ui.matrix  # noqa: F401
+        import fa_asmr.aligners.multispeaker_decoder  # noqa: F401
+        import fa_asmr.aligners.multispeaker_acoustic  # noqa: F401
+        import fa_asmr.aligners.multispeaker_schedule  # noqa: F401
+        import fa_asmr.aligners.multispeaker_post  # noqa: F401
+        import fa_asmr.aligners.multipersp_acoustic  # noqa: F401
+        import fa_asmr.aligners.multipersp_segments  # noqa: F401
+        import fa_asmr.aligners.multipersp_pipeline  # noqa: F401
         import fa_asmr_cli  # noqa: F401
         dev = "cuda" if torch.cuda.is_available() else "cpu"
-        return f"align + multispeaker + multiperspective + pipeline + cli 可导入，设备={dev}"
+        return f"align + multispeaker + multiperspective + pipeline + ui + cli 可导入，设备={dev}"
 
     step("第三方依赖导入", _deps)
     step("MMS-FA 权重", _model_file)

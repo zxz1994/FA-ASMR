@@ -2,11 +2,11 @@
 """错误处理与防静默失败回归测试。
 
 覆盖：
-- advanced_config.py 配置语法/类型/未知键告警（走 stderr，不污染 stdout）
+- fa_asmr/core/advanced_config.py 配置语法/类型/未知键告警（走 stderr，不污染 stdout）
 - fa_asmr_cli.py 参数校验、--json-out 独立落盘、--verify-script 空台本与结构化异常捕获
-- fa_asmr_pipeline.py 坏 UTF-8 BOM 识别、缺失文件/非法参数/显式缺失 LoRA/空台本前置报错
+- fa_asmr/pipeline/runner.py 坏 UTF-8 BOM 识别、缺失文件/非法参数/显式缺失 LoRA/空台本前置报错
 - furigana/fa_asmr_converter.py _get_heteronyms 失败不污染缓存、_ensure_pykakasi 抛异常而非 sys.exit、fugashi 退化告警
-- align_model.py _resolve_device / LoraAdapter 失败不改脏模型且抛错 / compute_emission 空波形校验
+- fa_asmr/aligners/align_model.py _resolve_device / LoraAdapter 失败不改脏模型且抛错 / compute_emission 空波形校验
 """
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ import types
 import unittest
 from unittest import mock
 
-import advanced_config as adv
+import fa_asmr.core.advanced_config as adv
 import fa_asmr_cli as cli
-import fa_asmr_pipeline as pipe
+import fa_asmr.pipeline.runner as pipe
 
 
 class TestAdvancedConfigWarnings(unittest.TestCase):
@@ -222,6 +222,9 @@ class TestPipelineValidation(unittest.TestCase):
             with open(txt, "w", encoding="utf-8") as f:
                 f.write("   \n\n")
 
+            import fa_asmr.aligners as _aligners_pkg
+            import fa_asmr.text as _text_pkg
+
             fake_align = types.SimpleNamespace(
                 DEFAULT_LORA_PATH="",
                 clear_model_cache=lambda: None,
@@ -229,7 +232,12 @@ class TestPipelineValidation(unittest.TestCase):
             fake_hn = types.SimpleNamespace()
 
             with mock.patch.object(pipe, "_ensure_runtime_ready"), \
-                    mock.patch.dict(sys.modules, {"align": fake_align, "haruraw2norm": fake_hn}):
+                    mock.patch.dict(
+                        sys.modules,
+                        {"fa_asmr.aligners.align": fake_align, "fa_asmr.text.haruraw2norm": fake_hn},
+                    ), \
+                    mock.patch.object(_aligners_pkg, "align", fake_align, create=True), \
+                    mock.patch.object(_text_pkg, "haruraw2norm", fake_hn, create=True):
                 # 1. 缺失台本
                 summary = {}
                 ok, _, err = pipe.run_pipeline(
@@ -371,7 +379,7 @@ class TestFuriganaAndModelErrors(unittest.TestCase):
         try:
             import torch
             import torch.nn as nn
-            import align_model as am
+            import fa_asmr.aligners.align_model as am
         except ImportError:
             self.skipTest("当前环境未安装 torch/torchaudio")
 
@@ -414,7 +422,7 @@ class TestFuriganaAndModelErrors(unittest.TestCase):
 
 class TestBootstrapAndUtilitiesErrors(unittest.TestCase):
     def test_torch_bootstrap_raises_runtime_error_when_headless_and_missing_torch(self):
-        import torch_bootstrap as tb
+        import fa_asmr.core.torch_bootstrap as tb
 
         prev_done = tb.TORCH_DONE
         try:
@@ -447,7 +455,7 @@ class TestBootstrapAndUtilitiesErrors(unittest.TestCase):
         self.assertIn("负数", buf_err.getvalue())
 
     def test_i18n_logs_warning_on_missing_key_or_bad_format(self):
-        import fa_asmr_i18n as i18n
+        import fa_asmr.core.i18n as i18n
 
         with self.assertLogs(i18n.logger, level="WARNING") as cm:
             self.assertEqual(i18n.tr("__nonexistent_key__"), "__nonexistent_key__")

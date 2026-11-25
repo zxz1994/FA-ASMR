@@ -1,6 +1,6 @@
 # NumPy 2.x 移除的别名补齐（原为三处重复副本之一，已统一到 np_compat）。
 # 必须在导入期执行：本模块下游的 pykakasi / janome 链路会用到。
-import np_compat
+import fa_asmr.core.np_compat as np_compat
 np_compat.apply()
 
 from janome.tokenizer import Tokenizer  # noqa: F401  （仅导入模块；构造器在首次使用时惰性创建）
@@ -8,7 +8,7 @@ import pykakasi
 import re
 import sys
 import logging
-from clause import (
+from fa_asmr.text.clause import (
     F,
     is_open_bracket as _is_open_bracket,
     is_prolong_mark as _is_prolong_mark,

@@ -243,7 +243,7 @@ def mark_short_comma_bridges(
     """
     global _ONO_IMPORT_WARNED
     try:
-        from ono_filter import is_easy_ono as _is_easy_ono
+        from fa_asmr.text.ono_base import is_easy_ono as _is_easy_ono
     except ImportError as e:
         if not _ONO_IMPORT_WARNED:
             _ONO_IMPORT_WARNED = True

@@ -578,14 +578,14 @@ class RubyAnnotator:
             # 正常由 GUI 启动时加入 sys.path；此处补一次回退，
             # 保证本模块被单独导入时也能找到。
             try:
-                import np_compat
+                import fa_asmr.core.np_compat as np_compat
             except ImportError:
                 import os as _os
                 import sys as _sys
                 _sys.path.insert(
                     0, _os.path.dirname(_os.path.dirname(
                         _os.path.abspath(__file__))))
-                import np_compat
+                import fa_asmr.core.np_compat as np_compat
             np_compat.apply()
             # yomikata hardcodes rotating logs under site-packages/logs.
             # Redirect those handlers to the writable application directory

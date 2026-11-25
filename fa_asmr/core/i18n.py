@@ -589,6 +589,83 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "en": "The following tasks will be processed as single-audio:\n\n{names}\n\nDo you want to proceed?",
     },
 
+    # ── 文件打开 / 任务失败弹窗 ──
+    "msg_file_missing_title": {
+        "zh": "文件不存在",
+        "ja": "ファイルが見つかりません",
+        "en": "File Not Found",
+    },
+    "msg_path_missing_title": {
+        "zh": "路径不存在",
+        "ja": "パスが見つかりません",
+        "en": "Path Not Found",
+    },
+    "msg_file_missing_text": {
+        "zh": "目标文件不存在或已被移动：\n{path}",
+        "ja": "対象ファイルが存在しないか、移動されています：\n{path}",
+        "en": "The target file does not exist or has been moved:\n{path}",
+    },
+    "msg_path_unspecified": {
+        "zh": "(未指定)",
+        "ja": "(未指定)",
+        "en": "(not specified)",
+    },
+    "msg_open_failed_title": {
+        "zh": "打开失败",
+        "ja": "開けませんでした",
+        "en": "Failed to Open",
+    },
+    "msg_open_file_failed_text": {
+        "zh": "无法打开文件：\n{path}\n\n{error}",
+        "ja": "ファイルを開けませんでした：\n{path}\n\n{error}",
+        "en": "Could not open the file:\n{path}\n\n{error}",
+    },
+    "msg_open_folder_failed_text": {
+        "zh": "无法定位文件夹：\n{path}\n\n{error}",
+        "ja": "フォルダを表示できませんでした：\n{path}\n\n{error}",
+        "en": "Could not locate the folder:\n{path}\n\n{error}",
+    },
+    "msg_open_subtitle_failed_text": {
+        "zh": "无法打开字幕：\n{path}\n\n{error}",
+        "ja": "字幕を開けませんでした：\n{path}\n\n{error}",
+        "en": "Could not open the subtitle:\n{path}\n\n{error}",
+    },
+    "msg_locate_file_failed_text": {
+        "zh": "无法定位文件：\n{path}\n\n{error}",
+        "ja": "ファイルの場所を表示できませんでした：\n{path}\n\n{error}",
+        "en": "Could not locate the file:\n{path}\n\n{error}",
+    },
+    "msg_unknown_error": {
+        "zh": "未知错误（请查看终端日志）",
+        "ja": "不明なエラー（ターミナルログを確認してください）",
+        "en": "Unknown error (see the terminal log)",
+    },
+    "msg_tasks_failed_title": {
+        "zh": "部分或全部任务失败",
+        "ja": "一部またはすべてのタスクが失敗しました",
+        "en": "Some or All Tasks Failed",
+    },
+    "msg_tasks_failed_text": {
+        "zh": "成功 {succeeded} 项，失败 {failed} 项：\n\n{details}\n\n详细报错与堆栈已展开至下方终端日志。",
+        "ja": "成功 {succeeded} 件、失敗 {failed} 件：\n\n{details}\n\nエラーの詳細とスタックトレースは下のターミナルログに表示されています。",
+        "en": "{succeeded} succeeded, {failed} failed:\n\n{details}\n\nFull errors and stack traces are shown in the terminal log below.",
+    },
+    "msg_tasks_failed_more": {
+        "zh": "…（其余 {count} 项请查看下方终端日志）",
+        "ja": "…（残り {count} 件は下のターミナルログを確認してください）",
+        "en": "… ({count} more — see the terminal log below)",
+    },
+    "msg_task_interrupted_title": {
+        "zh": "任务异常中断",
+        "ja": "タスクが異常終了しました",
+        "en": "Task Interrupted",
+    },
+    "msg_task_interrupted_text": {
+        "zh": "执行过程中发生未预期异常：\n\n{error}\n\n完整堆栈已输出至下方终端日志。",
+        "ja": "処理中に予期しない例外が発生しました：\n\n{error}\n\n完全なスタックトレースは下のターミナルログに出力されています。",
+        "en": "An unexpected exception occurred during processing:\n\n{error}\n\nThe full stack trace has been written to the terminal log below.",
+    },
+
     # ── 台本指南对话框 ──
     "guide_dlg_window_title": {
         "zh": "台本格式指南 · FA-ASMR",

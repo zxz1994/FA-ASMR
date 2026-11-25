@@ -241,6 +241,17 @@ echo ============================================
 start "" "{app_name}.exe"
 """, encoding="utf-8")
 
+    # 8.1 英文名启动器副本：海外用户可能认不出中文文件名，内容与上方等价
+    launcher_bat_en = final_dir / "Run-FA-ASMR.bat"
+    launcher_bat_en.write_text(f"""@echo off
+chcp 65001 >nul 2>&1
+cd /d "%~dp0"
+echo ============================================
+echo   FA-ASMR V2 ({variant.upper()} build, models included)
+echo ============================================
+start "" "{app_name}.exe"
+""", encoding="utf-8")
+
     # 9. 注入 1.26GB 模型
     model_dst_dir = final_dir / "models" / "hub" / "checkpoints"
     model_dst_dir.mkdir(parents=True, exist_ok=True)
@@ -327,9 +338,10 @@ start "" "{app_name}.exe"
         merge_bat.write_text(f"""@echo off
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
-echo 正在合并分卷文件...
+echo 正在合并分卷文件 / Merging split archive parts...
 copy /b {part_names} "{pkg_name}.zip"
-echo 合并完成: {pkg_name}.zip
+echo 合并完成 / Done: {pkg_name}.zip
+echo 请解压该 zip 后运行其中的启动脚本 / Extract this zip, then run Run-FA-ASMR.bat inside.
 pause
 """, encoding="utf-8")
 

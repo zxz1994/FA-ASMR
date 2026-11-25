@@ -25,7 +25,7 @@ import argparse
 # 音频 >= 100 分钟时会产出 3 位（如 [120:00:00]）。旧版写死 \d{1,2} 会让这类
 # 时间戳失配，行尾延长与结束标记处理会静默失效。
 try:
-    from align_utils import LRC_TS_ANYWHERE as _TS
+    from fa_asmr.aligners.align_utils import LRC_TS_ANYWHERE as _TS
 except ImportError:
     # 本文件也可作为独立 CLI 单独运行，此时 align_utils 未必在 sys.path 上。
     _TS = re.compile(r"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,2}))?\]")

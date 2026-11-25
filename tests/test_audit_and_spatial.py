@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""fa_asmr_audit.py 与 fa_asmr_spatial_sep.py 单元测试。"""
+"""fa_asmr.pipeline.audit 与 fa_asmr_spatial_sep.py 单元测试。"""
 from __future__ import annotations
 
 import contextlib
@@ -11,7 +11,7 @@ import unittest
 
 import numpy as np
 
-import fa_asmr_audit as audit
+import fa_asmr.pipeline.audit as audit
 import fa_asmr_spatial_sep as ssep
 
 
@@ -407,6 +407,216 @@ class TestSpatialSeparation(unittest.TestCase):
             self.assertEqual(n_clips, 2)
             self.assertTrue(all("clip_wav" in pr and os.path.isfile(pr["clip_wav"]) for pr in rep["priority_review"]))
             self.assertNotIn("clip_wav", by_ci[6])
+
+    def test_internal_gap_stretch_and_cross_speaker_engulf_high_priority(self):
+        # 复现 03 #28 形态：
+        #   ci0 (A): 句首未录词前吸到 10.0..10.5s，后半段正常落在 18.0..20.0s（均分高至 -1.4，但内部裂口 7.5s 且吞没 B 的 ci1/ci2）
+        #   ci1 (B): 12.0..14.0s 正常独白
+        #   ci2 (B): 15.0..17.0s 正常独白
+        #   ci3 (A) 与 ci4 (B): 正常双人同步叠声（A 30.0..32.5s 包夹 B 30.5..31.8s，但无断层且正常语速 -> 不应误报！）
+        alignment_tokens = [
+            ["de", "su", "ka", "ra", "a", "n", "shi", "n", "shi", "te"],  # ci0 A
+            ["o", "n", "na", "no", "ko"],                                 # ci1 B
+            ["ma", "ru", "da", "shi", "da"],                              # ci2 B
+            ["ki", "mo", "chi", "i", "i", "ne", "yo", "ne", "e", "e"],    # ci3 A (normal overlap)
+            ["su", "ki", "da", "yo"],                                     # ci4 B (normal overlap)
+        ]
+
+        def _mk(n, st, en, sc):
+            step = (en - st) / float(n)
+            return [{"original_start": st + i * step, "original_end": st + (i + 1) * step, "score": sc} for i in range(n)]
+
+        alignment_results = (
+            _mk(4, 10.0, 10.5, -2.2) + _mk(6, 18.0, 20.0, -0.9)  # ci0: gap=7.5s, mean_score=-1.42
+            + _mk(5, 12.0, 14.0, -3.4)                           # ci1: B
+            + _mk(5, 15.0, 17.0, -3.3)                           # ci2: B
+            + _mk(10, 30.0, 32.5, -1.0)                          # ci3: A normal overlap
+            + _mk(4, 30.5, 31.8, -1.0)                           # ci4: B normal overlap
+        )
+        rep = audit.build_alignment_audit(
+            alignment_tokens=alignment_tokens,
+            alignment_results=alignment_results,
+            ono_clause_flags=[0, 0, 0, 0, 0],
+            clause_surfaces=["ですから安心して", "おんなのこ", "まるだしだ", "きもちいいねよね", "すきだよ"],
+            clause_speakers=[("A",), ("B",), ("B",), ("A",), ("B",)],
+            clause_line_nos=[10, 11, 12, 20, 21],
+        )
+        by_ci = {s["clause_index"]: s for s in rep["suspect_clauses"]}
+        self.assertIn(0, by_ci)
+        self.assertIn("internal_gap_stretch", by_ci[0]["reasons"])
+        self.assertIn("cross_speaker_engulf", by_ci[0]["reasons"])
+        self.assertEqual(by_ci[0]["priority"], "high")
+        self.assertAlmostEqual(by_ci[0]["internal_gap_info"]["gap_sec"], 7.5, places=1)
+        self.assertEqual(by_ci[0]["engulf_info"]["engulfed_count"], 2)
+        self.assertEqual(by_ci[0]["engulf_info"]["engulfed_lines"], [11, 12])
+        # 正常同步叠声不应误报
+        self.assertNotIn(3, by_ci)
+        self.assertNotIn(4, by_ci)
+        pr_cis = [p["clause_index"] for p in rep["priority_review"] if p["kind"] == "suspect"]
+        self.assertIn(0, pr_cis)
+
+    def test_compact_clips_outputs_16k_mono_pcm16(self):
+        import soundfile as sf
+
+        sr = 48000
+        t = np.arange(sr * 4, dtype=np.float32) / float(sr)
+        sig = 0.4 * np.sin(2.0 * np.pi * 500.0 * t)
+        report = {
+            "suspect_clauses": [
+                {"clause_index": 0, "line": 1, "speaker": "", "start": 1.0, "end": 2.5, "reasons": ["internal_gap_stretch"], "priority": "high"},
+            ],
+            "unaligned_speech_gaps": [],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            aud = os.path.join(td, "hi_res.wav")
+            clips_dir = os.path.join(td, "clips")
+            sf.write(aud, np.stack([sig, sig], axis=1), sr, subtype="PCM_24")
+            n_clips = audit.export_audit_clips(
+                aud, report, clips_dir, pad_sec=0.2, priority_only=True, compact_clips=True
+            )
+            self.assertEqual(n_clips, 1)
+            clip_p = report["suspect_clauses"][0]["clip_wav"]
+            info = sf.info(clip_p)
+            self.assertEqual(info.samplerate, 16000)
+            self.assertEqual(info.channels, 1)
+            self.assertEqual(info.subtype, "PCM_16")
+            self.assertTrue(report["review_clips"][0]["compact"])
+
+    def test_solo_speaker_overlap_distinguishes_pure_solo_vs_true_stereo_overlap(self):
+        sr = 16000
+        dur = 12
+        n = sr * dur
+        rng = np.random.default_rng(42)
+        L = np.zeros(n, dtype=np.float32)
+        R = np.zeros(n, dtype=np.float32)
+
+        # 1.0..3.5s: 纯净单声源（带随机调制信号，左右声道严格按固定增益线性相关 -> msc~1.0, cres~0.0）
+        s_solo = rng.standard_normal(int(2.5 * sr)).astype(np.float32)
+        L[int(1.0 * sr):int(3.5 * sr)] = 0.6 * s_solo
+        R[int(1.0 * sr):int(3.5 * sr)] = 0.4 * s_solo
+
+        # 5.0..7.5s: 双人立体声真叠声（两路独立非相关信号，即使一侧大出 >12dB 也不应误报！）
+        s_a = rng.standard_normal(int(2.5 * sr)).astype(np.float32)
+        s_b = rng.standard_normal(int(2.5 * sr)).astype(np.float32)
+        L[int(5.0 * sr):int(7.5 * sr)] = 0.9 * s_a + 0.05 * s_b
+        R[int(5.0 * sr):int(7.5 * sr)] = 0.05 * s_a + 0.15 * s_b  # ILD > 12dB, 但两路独立 -> msc 低, cres 高
+
+        # 8.5..10.5s: 单声源参考基线段
+        s_ref = rng.standard_normal(int(2.0 * sr)).astype(np.float32)
+        L[int(8.5 * sr):int(10.5 * sr)] = 0.5 * s_ref
+        R[int(8.5 * sr):int(10.5 * sr)] = 0.5 * s_ref
+
+        wav_stereo = np.stack([L, R], axis=0)
+
+        def _mk(n_tok, st, en, sc):
+            step = (en - st) / float(n_tok)
+            return [{"original_start": st + i * step, "original_end": st + (i + 1) * step, "score": sc} for i in range(n_tok)]
+
+        alignment_tokens = [
+            ["ko", "n", "ni", "chi", "wa"],  # ci0 A 1.0..3.4 (-0.9)
+            ["o", "ha", "yo", "u", "ne"],    # ci1 B 1.2..2.8 (-2.1, 与 ci0 在纯单声源段重叠 -> strict_solo high!)
+            ["su", "ki", "da", "yo", "o"],   # ci2 A 5.0..7.4 (-1.0)
+            ["wa", "ta", "shi", "mo", "o"],  # ci3 B 5.2..7.2 (-1.1, 真叠声 ILD>12dB -> 不应误报!)
+            ["a", "ri", "ga", "to", "o"],    # ci4 A 8.5..10.5 (-1.0)
+        ]
+        alignment_results = (
+            _mk(5, 1.0, 3.4, -0.9)
+            + _mk(5, 1.2, 2.8, -2.1)
+            + _mk(5, 5.0, 7.4, -1.0)
+            + _mk(5, 5.2, 7.2, -1.1)
+            + _mk(5, 8.5, 10.5, -1.0)
+        )
+        rep = audit.build_alignment_audit(
+            alignment_tokens=alignment_tokens,
+            alignment_results=alignment_results,
+            ono_clause_flags=[0, 0, 0, 0, 0],
+            clause_surfaces=["こんにちは", "おはようね", "すきだよ", "わたしも", "ありがとう"],
+            clause_speakers=[("A",), ("B",), ("A",), ("B",), ("A",)],
+            clause_line_nos=[1, 2, 3, 4, 5],
+            diagnostics={"stereo_wav_16k": wav_stereo, "frame_sec": 0.02, "duration_sec": float(dur)},
+        )
+        by_ci = {s["clause_index"]: s for s in rep["suspect_clauses"]}
+        self.assertIn(1, by_ci)
+        self.assertIn("solo_speaker_overlap", by_ci[1]["reasons"])
+        self.assertTrue(by_ci[1]["overlap_info"]["strict_solo"])
+        self.assertEqual(by_ci[1]["priority"], "high")
+        self.assertNotIn(2, by_ci)
+        self.assertNotIn(3, by_ci)
+        self.assertEqual(rep["priority_review_count"], 1)
+
+    def test_neutral_ascii_clip_filenames_avoid_sensitive_stem_leak(self):
+        import soundfile as sf
+
+        sr = 16000
+        sig = np.zeros((sr * 4, 2), dtype=np.float32)
+        report = {
+            "suspect_clauses": [
+                {"clause_index": 0, "line": 12, "speaker": "凛咲", "start": 1.0, "end": 2.2, "reasons": ["skipped_semantic"], "priority": "high"},
+            ],
+            "unaligned_speech_gaps": [],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            sensitive_stem = "トラック2\u2017お隣のセックスを盗み聞きＨ"
+            aud = os.path.join(td, f"{sensitive_stem}.wav")
+            clips_dir = os.path.join(td, "clips")
+            sf.write(aud, sig, sr)
+            n_clips = audit.export_audit_clips(aud, report, clips_dir, pad_sec=0.2, priority_only=True)
+            self.assertEqual(n_clips, 1)
+            clip_p = report["suspect_clauses"][0]["clip_wav"]
+            clip_bname = os.path.basename(clip_p)
+            self.assertTrue(clip_bname.isascii(), f"Expected pure ASCII clip filename, got: {clip_bname}")
+            self.assertTrue(clip_bname.startswith("t02_"))
+            self.assertEqual(report["review_clips"][0]["source_stem"], sensitive_stem)
+
+    def test_priority_review_includes_neighbor_context_and_caps_merged_window_duration(self):
+        # 1) 验证 priority_review 自动携带前 2 句 / 后 2 句上下文
+        alignment_tokens = [
+            ["ko", "n", "ni", "chi", "wa"],   # L1 1..2s
+            ["o", "ha", "yo", "u", "ne"],     # L2 2.5..4s
+            ["su", "ki", "da", "yo", "o"],    # L3 skipped -> high priority suspect
+            ["ma", "ta", "ne", "yo", "o"],    # L4 6..7.5s
+            ["a", "ri", "ga", "to", "o"],     # L5 8..9.5s
+        ]
+
+        def _mk(n, st, en, sc):
+            step = (en - st) / float(n)
+            return [{"original_start": st + i * step, "original_end": st + (i + 1) * step, "score": sc} for i in range(n)]
+
+        alignment_results = (
+            _mk(5, 1.0, 2.0, -1.0)
+            + _mk(5, 2.5, 4.0, -1.0)
+            + [{"skipped": True, "score": -10.0} for _ in range(5)]
+            + _mk(5, 6.0, 7.5, -1.0)
+            + _mk(5, 8.0, 9.5, -1.0)
+        )
+        rep = audit.build_alignment_audit(
+            alignment_tokens=alignment_tokens,
+            alignment_results=alignment_results,
+            ono_clause_flags=[0, 0, 0, 0, 0],
+            clause_surfaces=["こんにちは", "おはようね", "すきだよ", "またねよ", "ありがとう"],
+            clause_speakers=[("凛咲",), ("文乃",), ("凛咲",), ("文乃",), ("凛咲",)],
+            clause_line_nos=[1, 2, 3, 4, 5],
+        )
+        self.assertEqual(len(rep["priority_review"]), 1)
+        pr = rep["priority_review"][0]
+        self.assertEqual(len(pr.get("context_before", [])), 2)
+        self.assertEqual(len(pr.get("context_after", [])), 2)
+        self.assertIn("こんにちは", pr["context_before"][0])
+        self.assertIn("おはようね", pr["context_before"][1])
+        self.assertIn("またねよ", pr["context_after"][0])
+        self.assertIn("ありがとう", pr["context_after"][1])
+
+        # 2) 验证 _merge_interval_items 传入 max_window_sec=12.0 时自动断开，不拼成 25s 超长切片
+        chain = [
+            {"start": 0.0, "end": 4.0},
+            {"start": 5.0, "end": 9.0},
+            {"start": 10.0, "end": 14.0},
+            {"start": 15.0, "end": 19.0},
+            {"start": 20.0, "end": 24.0},
+        ]
+        wins = ssep._merge_interval_items(chain, merge_gap_sec=1.5, max_window_sec=12.0)
+        self.assertGreaterEqual(len(wins), 3)
+        self.assertTrue(all((w["end"] - w["start"]) <= 12.0 for w in wins))
 
 
 if __name__ == "__main__":

@@ -57,12 +57,15 @@ def reset_cache():
 
 
 def config_path():
-    """定位 advanced_config.json：冻结后取 exe 同级，开发时取本模块同级。"""
+    """定位 advanced_config.json：冻结后取 exe 同级，开发时取项目根目录。"""
     if getattr(sys, "frozen", False):
         # onedir: sys.executable = dist/FA-ASMR/FA-ASMR.exe，
         # 权重 model.pt / 本配置均放在该 exe 同级目录（非 _internal）。
         return os.path.join(os.path.dirname(sys.executable), "advanced_config.json")
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "advanced_config.json")
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "advanced_config.json",
+    )
 
 
 def _strip_comments(text):

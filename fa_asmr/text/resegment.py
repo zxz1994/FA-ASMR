@@ -25,8 +25,8 @@ FA-ASMR_GUI.py：在「发音 token 拿到真实时间（result_list[idx]['start
 from __future__ import annotations
 
 import sys
-import clause
-from clause import F
+import fa_asmr.text.clause as clause
+from fa_asmr.text.clause import F
 
 # 候选切点判定：**不依赖任何字符表**。
 # 对齐只消费「有读音(pron)」的 token；凡 result_list 中「无 pron 且非行分隔 \n」的
@@ -105,7 +105,7 @@ def _is_ono_span(result_list, start_idx: int, end_idx: int = None) -> bool:
     if not toks:
         return False
     try:
-        from ono_filter import is_easy_ono
+        from fa_asmr.text.ono_filter import is_easy_ono
     except ImportError as e:
         # 降级为「非拟声」会让类型边界切分失效（台词/呻吟不再强制分行），
         # 但结果不会异常 —— 故必须打印一次告警，避免机制静默失效。

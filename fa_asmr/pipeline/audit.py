@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from clause import F
+from fa_asmr.text.clause import F
 
 _INLINE_RUBY_RE = re.compile(r"\{([^|{}]+)\|([^|{}]*)\}")
 _REPEAT_VOWEL_RE = re.compile(r"([aiueo])\1{2,}")
@@ -94,9 +94,28 @@ def _extract_clause_meta_from_alignment(
                 "start": round(float(worst_r["original_start"]), 2),
                 "end": round(float(worst_r["original_end"]), 2),
             }
+            max_internal_gap = 0.0
+            internal_gap_info: Optional[Dict[str, Any]] = None
+            if len(valid_r) >= 2:
+                ordered_r = sorted(valid_r, key=lambda x: (float(x[1]["original_start"]), float(x[1]["original_end"]), x[0]))
+                for (ti0, r0), (ti1, r1) in zip(ordered_r, ordered_r[1:]):
+                    g = float(r1["original_start"]) - float(r0["original_end"])
+                    if g > max_internal_gap:
+                        max_internal_gap = g
+                        internal_gap_info = {
+                            "gap_sec": round(g, 2),
+                            "before_end": round(float(r0["original_end"]), 2),
+                            "after_start": round(float(r1["original_start"]), 2),
+                            "before_pron": toks[ti0] if ti0 < len(toks) else "",
+                            "after_pron": toks[ti1] if ti1 < len(toks) else "",
+                        }
+            if max_internal_gap < 1.0:
+                internal_gap_info = None
         else:
             st, en, dur, mean_sc = None, None, 0.0, -10.0
             worst_tok = None
+            max_internal_gap = 0.0
+            internal_gap_info = None
 
         ruby_terms = [
             {"surface": m.group(1), "reading": m.group(2)}
@@ -117,6 +136,8 @@ def _extract_clause_meta_from_alignment(
             "n_phones": n_phones,
             "mean_score": mean_sc,
             "worst_token": worst_tok,
+            "max_internal_gap": max_internal_gap,
+            "internal_gap_info": internal_gap_info,
             "ruby_terms": ruby_terms,
         })
     return out
@@ -250,7 +271,275 @@ def _evaluate_clause_reasons(
         reasons.append("compressed")
     if n_ph >= 4 and dur > max(4.50, 0.55 * n_ph) and sc < -2.50:
         reasons.append("stretched")
+    if n_ph >= 4 and float(m.get("max_internal_gap", 0.0)) >= 2.50:
+        reasons.append("internal_gap_stretch")
     return reasons
+
+
+def _detect_cross_speaker_engulfs(
+    clause_metas: Sequence[Dict[str, Any]],
+) -> Dict[int, Dict[str, Any]]:
+    """多人轨专用：检测因首/尾未录词前吸或后吸导致单句畸长并完整包夹他方台词的异常。
+
+    仅在满足「完整包夹另一角色 >=1 句非拟声台词」且「句内存在 >=1.2s 断层或单音素均时长异常拉长」时触发，
+    避免误报正常双人同步叠声。
+    """
+    valid = [
+        m for m in clause_metas
+        if not m["is_ono"]
+        and not m["skipped"]
+        and m["start"] is not None
+        and m["end"] is not None
+        and m.get("speaker")
+        and "、" not in str(m["speaker"])
+    ]
+    speakers = {str(m["speaker"]) for m in valid}
+    if len(speakers) < 2:
+        return {}
+
+    engulfs: Dict[int, Dict[str, Any]] = {}
+    for m in valid:
+        st = float(m["start"])
+        en = float(m["end"])
+        dur = float(m["duration"])
+        n_ph = max(1, int(m["n_phones"]))
+        max_gap = float(m.get("max_internal_gap", 0.0))
+        if max_gap < 1.20 and not (dur >= 5.0 and (dur / float(n_ph)) >= 0.28):
+            continue
+        spk = str(m["speaker"])
+        hit_lines: List[int] = []
+        hit_spks: List[str] = []
+        for om in valid:
+            if str(om["speaker"]) == spk:
+                continue
+            ost = float(om["start"])
+            oen = float(om["end"])
+            if float(om["duration"]) < 0.25:
+                continue
+            if ost >= st - 0.05 and oen <= en + 0.05:
+                hit_lines.append(int(om["line"]))
+                if str(om["speaker"]) not in hit_spks:
+                    hit_spks.append(str(om["speaker"]))
+        if hit_lines:
+            engulfs[int(m["clause_index"])] = {
+                "engulfed_count": len(hit_lines),
+                "engulfed_lines": sorted(set(hit_lines)),
+                "engulfed_speakers": hit_spks,
+                "max_internal_gap": round(max_gap, 2),
+                "sec_per_phone": round(dur / float(n_ph), 3),
+            }
+    return engulfs
+
+
+def _stereo_coherence_stats(
+    wav_stereo: np.ndarray,
+    st_s: float,
+    en_s: float,
+    sr: int = 16000,
+) -> Tuple[float, float, Optional[float], float]:
+    """在 180..1800Hz 频带计算区间局部 STFT 双耳相干度 (MSC)、线性消去残差 (cres) 与 ILD。"""
+    from scipy import signal as _sig
+
+    n_fft = 1024
+    hop = 256
+    hop_sec = float(hop) / float(sr)
+    n_samples = int(wav_stereo.shape[1])
+    dur_tot = float(n_samples) / float(sr)
+    t_frames = (n_samples // hop) + 1
+
+    dur = max(0.0, float(en_s) - float(st_s))
+    if dur < 0.24:
+        mid = 0.5 * (float(st_s) + float(en_s))
+        w_st = max(0.0, mid - 0.12)
+        w_en = min(dur_tot, mid + 0.12)
+    else:
+        w_st = max(0.0, float(st_s) - 0.04)
+        w_en = min(dur_tot, float(en_s) + 0.04)
+    t0 = max(0, int(round(w_st / hop_sec)))
+    t1 = min(t_frames, int(round(w_en / hop_sec)))
+    if t1 - t0 < 8:
+        return 1.0, 1.0, None, 0.0
+
+    half_fft = n_fft // 2
+    s_lo = t0 * hop - half_fft
+    s_hi = (t1 - 1) * hop + half_fft
+    pad_l = max(0, -s_lo)
+    pad_r = max(0, s_hi - n_samples)
+    seg = wav_stereo[:, max(0, s_lo): min(n_samples, s_hi)]
+    if pad_l > 0 or pad_r > 0:
+        seg = np.pad(seg, ((0, 0), (pad_l, pad_r)), mode="constant")
+    if seg.shape[1] < n_fft:
+        return 1.0, 1.0, None, 0.0
+
+    freqs, _, zl = _sig.stft(
+        seg[0], fs=sr, nperseg=n_fft, noverlap=n_fft - hop,
+        window="hann", boundary=None, padded=False,
+    )
+    _, _, zr = _sig.stft(
+        seg[1], fs=sr, nperseg=n_fft, noverlap=n_fft - hop,
+        window="hann", boundary=None, padded=False,
+    )
+    sb_mask = (freqs >= 180.0) & (freqs <= 1800.0)
+    fl_w = zl[sb_mask]
+    fr_w = zr[sb_mask]
+    fe_w = np.sum((np.abs(fl_w) ** 2) + (np.abs(fr_w) ** 2) + 1e-24, axis=0)
+    if fe_w.size < 8:
+        return 1.0, 1.0, None, 0.0
+
+    e_floor = max(1e-24, 0.08 * float(np.percentile(fe_w, 90)))
+    T_w = fl_w.shape[1]
+    win_f = 16
+    step_f = 4
+    cres_list: List[float] = []
+    msc_list: List[float] = []
+    ild_list: List[float] = []
+    for k0 in range(0, max(1, T_w - win_f + 1), step_f):
+        k1 = min(T_w, k0 + win_f)
+        if k1 - k0 < 8 or float(np.mean(fe_w[k0:k1])) < e_floor:
+            continue
+        xl, xr = fl_w[:, k0:k1], fr_w[:, k0:k1]
+        rll = np.mean(np.abs(xl) ** 2, axis=1)
+        rrr = np.mean(np.abs(xr) ** 2, axis=1)
+        rlr = np.mean(xl * np.conj(xr), axis=1)
+        sum_l = float(np.sum(rll))
+        sum_r = float(np.sum(rrr))
+        abs_ild_db = abs(10.0 * float(np.log10(max(1e-24, sum_l) / max(1e-24, sum_r))))
+        tr = rll + rrr + 1e-24
+        top_f = tr >= np.percentile(tr, 40)
+        msc = float(
+            np.sum((np.abs(rlr[top_f]) ** 2) / np.maximum(1e-24, rll[top_f] * rrr[top_f]) * tr[top_f])
+            / float(np.sum(tr[top_f]))
+        )
+        res_l = np.mean(np.abs(xl - (rlr / np.maximum(1e-24, rrr))[:, None] * xr) ** 2, axis=1)
+        res_r = np.mean(np.abs(xr - (np.conj(rlr) / np.maximum(1e-24, rll))[:, None] * xl) ** 2, axis=1)
+        cres = float(min(np.sum(res_l) / max(1e-24, sum_l), np.sum(res_r) / max(1e-24, sum_r)))
+        cres_list.append(cres)
+        msc_list.append(msc)
+        ild_list.append(abs_ild_db)
+    if not msc_list:
+        return 1.0, 1.0, None, 0.0
+    return (
+        float(np.max(cres_list)),
+        float(np.percentile(cres_list, 85)),
+        float(np.percentile(msc_list, 15)),
+        float(np.percentile(ild_list, 25)),
+    )
+
+
+def _detect_solo_speaker_overlaps(
+    clause_metas: Sequence[Dict[str, Any]],
+    stereo_wav_16k: Optional[np.ndarray],
+    sr: int = 16000,
+) -> Dict[int, Dict[str, Any]]:
+    """立体声多人轨专用：检出「声学上为单人独白（高 MSC + 低 cres），却出现跨角色非拟声实词重叠」的异常。
+
+    设计原则（经实测标定）：
+      - 严格依赖立体声双耳相干度 (MSC) 与线性消去残差 (cres)，**不走 ILD>=12dB 快速通道**，避免高潮单耳贴麦真叠声误报；
+      - 单声道音频自动跳过；仅检查双方均非拟声、重叠 >=0.50s（或占较短句 >=50% 且 >=0.25s）；
+      - 分两档：
+        * strict_solo=True（极纯净单声源，如 msc15>=0.88 且 cres85<=0.08）-> priority='high' 进 priority_review；
+        * strict_solo=False（中等边界区，如轻声居中叠声）-> 记入 suspect_clauses (priority='normal') 留档。
+    """
+    if stereo_wav_16k is None:
+        return {}
+    wav = np.asarray(stereo_wav_16k, dtype=np.float32)
+    if wav.ndim != 2 or wav.shape[0] < 2 or wav.shape[1] < sr:
+        return {}
+    wav = wav[:2]
+
+    valid = [
+        m for m in clause_metas
+        if not m["is_ono"]
+        and not m["skipped"]
+        and m["start"] is not None
+        and m["end"] is not None
+        and m.get("speaker")
+        and "、" not in str(m["speaker"])
+    ]
+    if len({str(m["speaker"]) for m in valid}) < 2:
+        return {}
+    valid.sort(key=lambda x: (float(x["start"]), float(x["end"])))
+
+    cand_pairs: List[Tuple[float, float, float, Dict[str, Any], Dict[str, Any]]] = []
+    for i, m1 in enumerate(valid):
+        s1, e1 = float(m1["start"]), float(m1["end"])
+        spk1 = str(m1["speaker"])
+        for j in range(i + 1, len(valid)):
+            m2 = valid[j]
+            s2, e2 = float(m2["start"]), float(m2["end"])
+            if s2 >= e1:
+                break
+            if str(m2["speaker"]) == spk1:
+                continue
+            ov_st = max(s1, s2)
+            ov_en = min(e1, e2)
+            ov = ov_en - ov_st
+            short_dur = max(0.05, min(e1 - s1, e2 - s2))
+            if ov >= 0.50 or (ov >= 0.25 and ov >= 0.50 * short_dur):
+                cand_pairs.append((ov_st, ov_en, ov, m1, m2))
+    if not cand_pairs:
+        return {}
+
+    # 自适应标定本轨双耳相干基线（排除单侧极强贴麦段）
+    ref_spans = [(float(m["start"]), float(m["end"])) for m in valid if float(m["duration"]) >= 0.40]
+    step_ref = max(1, len(ref_spans) // 40 or 1)
+    cres_vals: List[float] = []
+    msc_vals: List[float] = []
+    for s0, s1 in ref_spans[::step_ref]:
+        _, c_p85, m_p15, ild_p25 = _stereo_coherence_stats(wav, s0, s1, sr=sr)
+        if m_p15 is not None and ild_p25 < 12.0:
+            cres_vals.append(c_p85)
+            msc_vals.append(m_p15)
+    base_cres = min(0.16, float(np.percentile(cres_vals, 30))) if cres_vals else 0.10
+    base_msc = max(0.70, float(np.percentile(msc_vals, 70))) if msc_vals else 0.75
+
+    overlaps: Dict[int, Dict[str, Any]] = {}
+    for ov_st, ov_en, ov, m1, m2 in cand_pairs:
+        c_max, c_p85, m_p15, ild_p25 = _stereo_coherence_stats(wav, ov_st, ov_en, sr=sr)
+        if m_p15 is None:
+            continue
+        is_mild_solo = (
+            m_p15 >= max(0.66, 0.85 * base_msc)
+            and c_p85 <= max(0.18, 1.35 * base_cres)
+            and c_max <= max(0.28, 1.75 * base_cres)
+        )
+        if not is_mild_solo:
+            continue
+        is_strict_solo = (
+            m_p15 >= max(0.88, 0.94 * base_msc)
+            and c_p85 <= min(0.08, max(0.05, 1.10 * base_cres))
+            and c_max <= max(0.14, 1.50 * base_cres)
+        )
+        # 将嫌疑归属到更可疑的一方（优先存在句内大断层者，否则归给均分更低者）
+        g1 = float(m1.get("max_internal_gap", 0.0))
+        g2 = float(m2.get("max_internal_gap", 0.0))
+        if (g1 >= 1.20) != (g2 >= 1.20):
+            suspect_m, peer_m = (m1, m2) if g1 >= 1.20 else (m2, m1)
+        elif float(m1["mean_score"]) <= float(m2["mean_score"]):
+            suspect_m, peer_m = m1, m2
+        else:
+            suspect_m, peer_m = m2, m1
+
+        ci = int(suspect_m["clause_index"])
+        info = {
+            "strict_solo": bool(is_strict_solo),
+            "overlap_start": round(ov_st, 2),
+            "overlap_end": round(ov_en, 2),
+            "overlap_sec": round(ov, 2),
+            "msc15": round(m_p15, 3),
+            "cres85": round(c_p85, 3),
+            "ild25_db": round(ild_p25, 1),
+            "peer_clause_index": int(peer_m["clause_index"]),
+            "peer_line": int(peer_m["line"]),
+            "peer_speaker": str(peer_m["speaker"]),
+            "peer_text": str(peer_m["text"]),
+        }
+        prev = overlaps.get(ci)
+        if prev is None or (info["strict_solo"] and not prev["strict_solo"]) or (
+            info["strict_solo"] == prev["strict_solo"] and info["overlap_sec"] > prev["overlap_sec"]
+        ):
+            overlaps[ci] = info
+    return overlaps
 
 
 def _detect_isolated_speaker_jumps(
@@ -336,6 +625,10 @@ def _is_priority_suspect(entry: Dict[str, Any]) -> bool:
         return True
     if "isolated_speaker_jump" in reasons:
         return True
+    if "internal_gap_stretch" in reasons or "cross_speaker_engulf" in reasons:
+        return True
+    if "solo_speaker_overlap" in reasons and bool((entry.get("overlap_info") or {}).get("strict_solo")):
+        return True
     if "compressed" in reasons and sc < -5.5:
         return True
     if "low_score" in reasons and sc < -5.8:
@@ -343,11 +636,73 @@ def _is_priority_suspect(entry: Dict[str, Any]) -> bool:
     return False
 
 
+def _fmt_context_clause(m: Dict[str, Any]) -> str:
+    ln = m.get("line")
+    spk = str(m.get("speaker") or "")
+    txt = str(m.get("text") or "").strip()
+    st, en = m.get("start"), m.get("end")
+    t_part = f"({float(st):.1f}-{float(en):.1f}s)" if (st is not None and en is not None) else ""
+    s_part = f"[{spk}]" if spk else ""
+    return f"L{ln}{t_part}{s_part}: {txt}"
+
+
+def _neighbor_context_for_suspect(
+    clause_index: Any,
+    metas: Sequence[Dict[str, Any]],
+    ci_to_pos: Dict[int, int],
+    window: int = 2,
+) -> Tuple[List[str], List[str]]:
+    if clause_index is None or int(clause_index) not in ci_to_pos:
+        return [], []
+    pos = ci_to_pos[int(clause_index)]
+    before = [_fmt_context_clause(metas[k]) for k in range(max(0, pos - window), pos)]
+    after = [_fmt_context_clause(metas[k]) for k in range(pos + 1, min(len(metas), pos + 1 + window))]
+    return before, after
+
+
+def _neighbor_context_for_gap(
+    g_st: Any,
+    g_en: Any,
+    aligned_metas: Sequence[Dict[str, Any]],
+    window: int = 2,
+) -> Tuple[List[str], List[str]]:
+    if g_st is None or g_en is None or not aligned_metas:
+        return [], []
+    st_f, en_f = float(g_st), float(g_en)
+    before_m = [m for m in aligned_metas if float(m["end"]) <= st_f + 0.5][-window:]
+    after_m = [m for m in aligned_metas if float(m["start"]) >= en_f - 0.5][:window]
+    return [_fmt_context_clause(m) for m in before_m], [_fmt_context_clause(m) for m in after_m]
+
+
 def _build_priority_review(
     suspects: Sequence[Dict[str, Any]],
     gaps: Sequence[Dict[str, Any]],
+    clause_metas: Optional[Sequence[Dict[str, Any]]] = None,
+    metas_by_side: Optional[Dict[str, Sequence[Dict[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
-    """汇总全部缺句空档与高危可疑句，供多模态 Agent 直接按序定向听审。"""
+    """汇总全部缺句空档与高危可疑句（附前后各 2 句邻句上下文），供多模态 Agent 直接定向听审。"""
+    def _prep(seq: Optional[Sequence[Dict[str, Any]]]) -> Tuple[List[Dict[str, Any]], Dict[int, int], List[Dict[str, Any]]]:
+        non_empty = [m for m in (seq or ()) if str(m.get("text", "")).strip()]
+        ci_map = {int(m["clause_index"]): i for i, m in enumerate(non_empty) if m.get("clause_index") is not None}
+        aligned = sorted(
+            [m for m in non_empty if not m.get("skipped") and m.get("start") is not None and m.get("end") is not None],
+            key=lambda x: (float(x["start"]), float(x["end"])),
+        )
+        return non_empty, ci_map, aligned
+
+    side_cache: Dict[str, Tuple[List[Dict[str, Any]], Dict[int, int], List[Dict[str, Any]]]] = {}
+    if metas_by_side:
+        for k, v in metas_by_side.items():
+            side_cache[k] = _prep(v)
+    default_pack = _prep(clause_metas)
+
+    def _pick_pack(persp: Optional[str]) -> Tuple[List[Dict[str, Any]], Dict[int, int], List[Dict[str, Any]]]:
+        if persp and persp in side_cache:
+            return side_cache[persp]
+        if "A" in side_cache:
+            return side_cache["A"]
+        return default_pack
+
     review: List[Dict[str, Any]] = []
     for g in gaps:
         item = {
@@ -362,6 +717,12 @@ def _build_priority_review(
         }
         if g.get("perspective") is not None:
             item["perspective"] = g["perspective"]
+        _, _, aligned = _pick_pack(g.get("perspective"))
+        cb, ca = _neighbor_context_for_gap(g.get("start"), g.get("end"), aligned)
+        if cb:
+            item["context_before"] = cb
+        if ca:
+            item["context_after"] = ca
         review.append(item)
 
     for s in suspects:
@@ -383,6 +744,18 @@ def _build_priority_review(
             item["perspective"] = s["perspective"]
         if s.get("jump_info") is not None:
             item["jump_info"] = s["jump_info"]
+        if s.get("internal_gap_info") is not None:
+            item["internal_gap_info"] = s["internal_gap_info"]
+        if s.get("engulf_info") is not None:
+            item["engulf_info"] = s["engulf_info"]
+        if s.get("overlap_info") is not None:
+            item["overlap_info"] = s["overlap_info"]
+        non_empty, ci_map, _ = _pick_pack(s.get("perspective"))
+        cb, ca = _neighbor_context_for_suspect(s.get("clause_index"), non_empty, ci_map)
+        if cb:
+            item["context_before"] = cb
+        if ca:
+            item["context_after"] = ca
         review.append(item)
     return review
 
@@ -392,6 +765,8 @@ def _make_suspect_entry(
     reasons: List[str],
     perspective: Optional[str] = None,
     jump_info: Optional[Dict[str, Any]] = None,
+    engulf_info: Optional[Dict[str, Any]] = None,
+    overlap_info: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     st = round(float(m["start"]), 2) if m["start"] is not None else None
     en = round(float(m["end"]), 2) if m["end"] is not None else None
@@ -414,6 +789,12 @@ def _make_suspect_entry(
         entry["perspective"] = perspective
     if jump_info is not None:
         entry["jump_info"] = jump_info
+    if m.get("internal_gap_info") is not None:
+        entry["internal_gap_info"] = m["internal_gap_info"]
+    if engulf_info is not None:
+        entry["engulf_info"] = engulf_info
+    if overlap_info is not None:
+        entry["overlap_info"] = overlap_info
     entry["priority"] = "high" if _is_priority_suspect(entry) else "normal"
     return entry
 
@@ -448,7 +829,10 @@ def build_alignment_audit(
     eff_low_thr = min(float(low_score_threshold), med_score - 1.80)
     short_low_thr = min(-4.80, eff_low_thr - 1.40)
 
+    diag = diagnostics or {}
     jumps = _detect_isolated_speaker_jumps(metas)
+    engulfs = _detect_cross_speaker_engulfs(metas)
+    solo_overlaps = _detect_solo_speaker_overlaps(metas, diag.get("stereo_wav_16k"))
 
     suspects: List[Dict[str, Any]] = []
     for m in metas:
@@ -458,19 +842,26 @@ def build_alignment_audit(
         jinfo = jumps.get(int(m["clause_index"]))
         if jinfo is not None:
             reasons.append("isolated_speaker_jump")
+        einfo = engulfs.get(int(m["clause_index"]))
+        if einfo is not None:
+            reasons.append("cross_speaker_engulf")
+        oinfo = solo_overlaps.get(int(m["clause_index"]))
+        if oinfo is not None:
+            reasons.append("solo_speaker_overlap")
         if reasons:
-            suspects.append(_make_suspect_entry(m, reasons, jump_info=jinfo))
+            suspects.append(_make_suspect_entry(m, reasons, jump_info=jinfo, engulf_info=einfo, overlap_info=oinfo))
 
     suspects.sort(
         key=lambda x: (
-            0 if "skipped_semantic" in x["reasons"] else (1 if "isolated_speaker_jump" in x["reasons"] else 2),
+            0 if "skipped_semantic" in x["reasons"] else (
+                1 if any(r in x["reasons"] for r in ("isolated_speaker_jump", "internal_gap_stretch", "cross_speaker_engulf", "solo_speaker_overlap")) else 2
+            ),
             0 if x.get("priority") == "high" else 1,
             x["mean_score"],
             x["clause_index"],
         )
     )
 
-    diag = diagnostics or {}
     frame_sec = float(diag.get("frame_sec", 0.02))
     dur_sec = float(diag.get("duration_sec", 0.0))
     ctc_nb = diag.get("ctc_nb_active")
@@ -480,7 +871,7 @@ def build_alignment_audit(
         frame_sec=frame_sec,
         duration_sec=dur_sec,
     )
-    priority_review = _build_priority_review(suspects, gaps)
+    priority_review = _build_priority_review(suspects, gaps, clause_metas=metas)
 
     return {
         "track_median_score": round(med_score, 2),
@@ -601,8 +992,15 @@ def build_multiperspective_audit(
     eff_low_thr = min(float(low_score_threshold), med_score - 1.80)
     short_low_thr = min(-4.80, eff_low_thr - 1.40)
 
+    segs = list(sim_segs or ())
+    da = diagnostics_a or {}
+    db = diagnostics_b or {}
     jumps_a = _detect_isolated_speaker_jumps([m for side, m in chosen if side == "A"])
     jumps_b = _detect_isolated_speaker_jumps([m for side, m in chosen if side == "B"])
+    engulfs_a = _detect_cross_speaker_engulfs([m for side, m in chosen if side == "A"])
+    engulfs_b = _detect_cross_speaker_engulfs([m for side, m in chosen if side == "B"])
+    ov_a = _detect_solo_speaker_overlaps([m for side, m in chosen if side == "A"], da.get("stereo_wav_16k"))
+    ov_b = _detect_solo_speaker_overlaps([m for side, m in chosen if side == "B"], db.get("stereo_wav_16k"))
 
     suspects: List[Dict[str, Any]] = []
     for side, m in chosen:
@@ -610,21 +1008,26 @@ def build_multiperspective_audit(
         jinfo = (jumps_a if side == "A" else (jumps_b if side == "B" else {})).get(int(m["clause_index"]))
         if jinfo is not None:
             reasons.append("isolated_speaker_jump")
+        einfo = (engulfs_a if side == "A" else (engulfs_b if side == "B" else {})).get(int(m["clause_index"]))
+        if einfo is not None:
+            reasons.append("cross_speaker_engulf")
+        oinfo = (ov_a if side == "A" else (ov_b if side == "B" else {})).get(int(m["clause_index"]))
+        if oinfo is not None:
+            reasons.append("solo_speaker_overlap")
         if reasons:
-            suspects.append(_make_suspect_entry(m, reasons, perspective=side, jump_info=jinfo))
+            suspects.append(_make_suspect_entry(m, reasons, perspective=side, jump_info=jinfo, engulf_info=einfo, overlap_info=oinfo))
 
     suspects.sort(
         key=lambda x: (
-            0 if "skipped_semantic" in x["reasons"] else (1 if "isolated_speaker_jump" in x["reasons"] else 2),
+            0 if "skipped_semantic" in x["reasons"] else (
+                1 if any(r in x["reasons"] for r in ("isolated_speaker_jump", "internal_gap_stretch", "cross_speaker_engulf", "solo_speaker_overlap")) else 2
+            ),
             0 if x.get("priority") == "high" else 1,
             x["mean_score"],
             x["clause_index"],
         )
     )
 
-    segs = list(sim_segs or ())
-    da = diagnostics_a or {}
-    db = diagnostics_b or {}
     raw_gaps_a = _detect_unaligned_speech_gaps(
         clause_metas=metas_a,
         ctc_nb_active=da.get("ctc_nb_active"),
@@ -661,7 +1064,11 @@ def build_multiperspective_audit(
         gaps.append(gb)
 
     gaps.sort(key=lambda x: (x["start"], x.get("perspective", "A")))
-    priority_review = _build_priority_review(suspects, gaps)
+    priority_review = _build_priority_review(
+        suspects,
+        gaps,
+        metas_by_side={"A": metas_a, "B": metas_b, "BOTH": metas_a},
+    )
 
     return {
         "is_multiperspective": True,
@@ -677,6 +1084,28 @@ def build_multiperspective_audit(
     }
 
 
+def _downsample_to_mono_16k(wav_arr: np.ndarray, sr: int) -> Tuple[np.ndarray, int]:
+    """将审听切片转为 16kHz 单声道 float32，显著降低体积与多模态听审开销。"""
+    arr = np.asarray(wav_arr, dtype=np.float32)
+    mono = np.mean(arr, axis=0) if arr.ndim == 2 else arr.reshape(-1)
+    target_sr = 16000
+    if sr <= target_sr or mono.size < 2:
+        return mono.astype(np.float32), int(sr)
+    try:
+        from math import gcd
+        from scipy.signal import resample_poly
+
+        g = gcd(int(sr), target_sr)
+        out = resample_poly(mono, target_sr // g, int(sr) // g).astype(np.float32)
+        return out, target_sr
+    except Exception:
+        n_out = max(1, int(round(mono.size * (float(target_sr) / float(sr)))))
+        x_old = np.linspace(0.0, 1.0, num=mono.size, dtype=np.float64)
+        x_new = np.linspace(0.0, 1.0, num=n_out, dtype=np.float64)
+        out = np.interp(x_new, x_old, mono).astype(np.float32)
+        return out, target_sr
+
+
 def export_audit_clips(
     audio_path: str,
     audit_report: Dict[str, Any],
@@ -684,12 +1113,14 @@ def export_audit_clips(
     pad_sec: float = 1.0,
     max_clips_per_kind: int = 30,
     merge_gap_sec: float = 1.5,
+    max_window_sec: float = 12.0,
     enable_separate: bool = False,
     sep_sources: int = 2,
     force_separate: bool = False,
     sigma2: float = 0.45,
     audio_path_b: Optional[str] = None,
     priority_only: bool = False,
+    compact_clips: bool = False,
 ) -> int:
     """按体检报告合并相邻异常窗、切出原生采样率审听 WAV，并可选联动立体声空间分离。
 
@@ -706,6 +1137,7 @@ def export_audit_clips(
         _probe_audio_duration,
         _read_stereo_audio,
         has_stereo_spatial_spread,
+        make_neutral_clip_prefix,
         separate_stereo_spatial,
     )
 
@@ -739,11 +1171,9 @@ def export_audit_clips(
         lines_hit = sorted({int(it["line"]) for it in members if it.get("line") is not None})
         spks_hit = sorted({str(it["speaker"]) for it in members if it.get("speaker")})
         line_tag = f"_L{lines_hit[0]}" if (kind == "suspect" and lines_hit) else ""
-        base_tag = f"{stem}_{kind}_{idx:02d}{line_tag}_{a_st:.1f}s_{a_en:.1f}s"
+        n_pfx = make_neutral_clip_prefix(stem, side=("B" if use_b else "A"), dual_pov=bool(audio_path_b))
+        base_tag = f"{n_pfx}_{kind}_{idx:02d}{line_tag}_{a_st:.1f}s_{a_en:.1f}s"
         out_p = os.path.join(clips_dir, f"{base_tag}.wav")
-        sf.write(out_p, wav_data.T.astype(np.float32), sr)
-        exported += 1
-
         sep_files: List[Dict[str, Any]] = []
         spread_meta: Optional[Dict[str, Any]] = None
         did_sep = False
@@ -756,13 +1186,25 @@ def export_audit_clips(
                 )
                 for k, cm in enumerate(ch_meta):
                     ch_p = os.path.join(clips_dir, f"{base_tag}_K{k+1}_{cm['position_tag']}.wav")
-                    sf.write(ch_p, sep_wavs[k], sr)
+                    if compact_clips:
+                        c_sig, c_sr = _downsample_to_mono_16k(sep_wavs[k], sr)
+                        sf.write(ch_p, c_sig, c_sr, subtype="PCM_16")
+                    else:
+                        sf.write(ch_p, sep_wavs[k], sr)
                     sep_files.append({**cm, "wav": ch_p})
                 did_sep = True
                 separated_count += 1
             spread_meta["separated"] = did_sep
         elif enable_separate:
             spread_meta = {"ild_span_db": 0.0, "ild_iqr_db": 0.0, "ild_median_db": 0.0, "msc": 1.0, "cres": 0.0, "is_spread": False, "separated": False}
+
+        out_sr = int(sr)
+        if compact_clips:
+            c_mono, out_sr = _downsample_to_mono_16k(wav_data, sr)
+            sf.write(out_p, c_mono, out_sr, subtype="PCM_16")
+        else:
+            sf.write(out_p, wav_data.T.astype(np.float32), sr)
+        exported += 1
 
         for it in members:
             it["clip_wav"] = out_p
@@ -777,12 +1219,16 @@ def export_audit_clips(
             "start": a_st,
             "end": a_en,
             "duration": round(a_en - a_st, 2),
-            "sample_rate": int(sr),
+            "sample_rate": int(out_sr),
             "lines": lines_hit,
             "speakers": spks_hit,
             "member_count": len(members),
+            "source_stem": stem,
+            "source_audio": os.path.abspath(aud_p),
             "clip_wav": out_p,
         }
+        if compact_clips:
+            clip_entry["compact"] = True
         if audio_path_b:
             clip_entry["perspective"] = "B" if use_b else "A"
         if spread_meta is not None:
@@ -799,13 +1245,15 @@ def export_audit_clips(
                 by_side[s].append(it)
             idx_counter = 0
             for side in ("A", "B"):
-                for win in _merge_interval_items(by_side[side], merge_gap_sec=merge_gap_sec):
+                for win in _merge_interval_items(
+                    by_side[side], merge_gap_sec=merge_gap_sec, max_window_sec=max_window_sec
+                ):
                     if idx_counter >= max_clips_per_kind:
                         break
                     idx_counter += 1
                     _export_window(kind, idx_counter, win, side)
         else:
-            wins = _merge_interval_items(items, merge_gap_sec=merge_gap_sec)
+            wins = _merge_interval_items(items, merge_gap_sec=merge_gap_sec, max_window_sec=max_window_sec)
             for idx, win in enumerate(wins[:max_clips_per_kind], 1):
                 _export_window(kind, idx, win, "A")
 

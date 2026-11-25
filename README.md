@@ -24,7 +24,7 @@
 * **Obsidian Acoustic Console 暗色工作台（无需 Agent，开箱即用）**：全新暗色专业音频控制台桌面端（支持 Windows 高分屏 DPI 感知、拖拽配对与互换、单轨/多轨/双视角切换，以及简体中文 / 日本語 / English 即时热切换），普通用户双击启动即可纯离线完成全部打轴，完全不依赖任何 AI Agent。
 * **纯离线高精度闭环（`v2.5.0` 新增）**：
   * **整目录分级注音词表与精准覆写（`--export-ruby` / `--ruby-map`）**：一次加载模型合并导出去重词表，按局部搭配去重采样上下文，自动将多音字、单字接辞切碎（如 `お母様`）、角色名提权置顶；支持 `global` 与 `by_file -> by_line` 覆写且单字绝不劈裂复合词；
-  * **声学体检雷达（`fa_asmr_audit.py` / `--audit`）**：零额外推理开销，自动标出未覆盖活跃语音空档（台本缺句/即兴加词）、删戏未录句与多人轨短词跨区前吸（`isolated_speaker_jump`），顶层聚合 `priority_review` 并默认仅切高危审听 WAV；
+  * **声学体检雷达（`fa_asmr/pipeline/audit.py` / `--audit`）**：零额外推理开销，自动标出未覆盖活跃语音空档（台本缺句/即兴加词）、删戏未录句与多人轨短词跨区前吸（`isolated_speaker_jump`），顶层聚合 `priority_review` 并默认仅切高危审听 WAV；
   * **零依赖双耳立体声空间分离（`fa_asmr_spatial_sep.py` / `--audit-separate`）**：纯 `numpy/scipy` 基于 ILD+IPD 软掩码将多人真叠声段无损拆出左/中/右干声 WAV（单人轨自动跳过拆轨，亦支持无台本独立扫描拆轨）。
 * **多编码自动嗅探与低硬件门槛**：原生自动识别 UTF-8 / UTF-8-BOM / Shift-JIS (CP932) / GB18030 / UTF-16，无需手动转码；CUDA 默认 FP16 混合精度 + 固定最优 `3000` 帧分块（峰值显存约 `3.74 GB`，4 GB+ 显存即可运行），无显卡设备支持 CPU INT8 动态量化。
 
@@ -61,6 +61,11 @@ pip install -r requirements.txt
 
 # 4. 单独安装注音模型（避免拉入冗余开发依赖）
 pip install --no-deps yomikata
+
+# 5. 下载 yomikata dBert 注音权重（约 423 MB，首次使用前必做）
+#    该命令需要 plac 与 requests；缺少此权重时注音会静默降级为 UniDic/pykakasi，多音字读音准确率下降
+pip install plac requests
+python -m yomikata download
 ```
 
 **模型权重说明**：
@@ -69,6 +74,7 @@ pip install --no-deps yomikata
 | :--- | :--- | :--- |
 | **MMS-FA 基础模型** | `models/hub/checkpoints/model.pt` | 约 1.2 GB，首次运行自动下载；也可预先放置实现纯离线运行 |
 | **ASMR 专用 LoRA** | `lora/fa_asmr_v9e10.pt` | **仓库已内置**（约 12.2 MB），针对日语 ASMR 耳语/弱音调优 |
+| **yomikata dBert 注音权重** | `site-packages/yomikata/dbert-artifacts/` | 约 423 MB，由上方第 5 步 `python -m yomikata download` 下载；离线环境可直接拷贝该目录 |
 
 **启动桌面端**：
 * Windows 直接双击 `run.bat`，或命令行执行 `python FA-ASMR_GUI.py`。
@@ -159,32 +165,39 @@ python tools/compact_subs.py verify --jp-dir ./字幕（日文） --cn-dir ./字
 
 ```text
 FA-ASMR/
-├── AGENTS.md                   # 外部 AI Agent 端到端操作与维护指南
-├── fa_asmr_cli.py              # 无界面 CLI（--mode auto / --export-ruby / --ruby-map / --audit-separate / --only / --json）
-├── fa_asmr_pipeline.py         # 无界面核心对齐管线、编码嗅探、分级注音词表与覆写、LRC/SRT 组装与配对
-├── fa_asmr_audit.py            # 对齐后声学体检雷达、双视角联合体检、短词跳变检测与高危切片导出
-├── fa_asmr_spatial_sep.py      # 零依赖双耳立体声 ILD+IPD 空间分离工具（支持独立拆轨与体检联动）
-├── tools/compact_subs.py       # 紧凑翻译导出 / 回填 .srt+.lrc / 1:1 一致性终检脚本
-├── FA-ASMR_GUI.py              # 桌面端启动器、--cli 路由与 --self-test 打包自检
-├── fa_asmr_ui.py               # Obsidian Acoustic Console 暗色音频控制台前端
-├── fa_asmr_i18n.py             # 中 / 日 / 英三语热切换词典
-├── align.py                    # 单向对齐主引擎入口
-├── align_multispeaker.py       # 多人分轨 / 乱序重排 / STFT 独白遮罩引擎
-├── align_multiperspective.py   # 多视角联合校准与双坐标投影引擎
-├── align_trellis.py            # 全局约束 CTC Viterbi 解码器（Numba JIT）
-├── align_acoustic.py           # 逐帧 RMS、底噪估计与双声道 Better-Ear 融合
-├── align_model.py              # MMS-FA 加载、LoRA 注入、FP16 / INT8 推理
-├── align_post.py               # 静音吸附、Token 时间戳回映射与单调化
-├── align_utils.py              # 基础文本规范化与时间戳正则
-├── clause.py                   # 跨模块数据契约常量 (F)、子句边界与短句顿号桥接
-├── haruraw2norm.py             # 汉字 / 假名 / 罗马音到 MMS-FA 音素转换
-├── inline_leak_clean.py        # 内联振假名泄露自动清洗
-├── ono_base.py / ono_filter.py / ono_block_corpus.py  # 拟声词多阶段守门与实词保护
-├── resegment.py / merge_short.py / lrc_end_extend.py  # 标点重分段、短句合并与尾端延展
-├── furigana/                   # 三层日语振假名注音引擎与异读覆盖表
-├── lora/fa_asmr_v9e10.pt       # 内置 ASMR 专用 LoRA 适配器权重
-├── tests/                      # 零依赖回归测试套件（标准库 unittest）
-└── build_in_ci.py / FA-ASMR.spec  # GitHub Actions CPU & CUDA 双变体打包脚本
+├── AGENTS.md                        # 外部 AI Agent 端到端操作与维护指南
+├── FA-ASMR_GUI.py                   # 桌面端启动器、--cli 路由与 --self-test 打包自检
+├── fa_asmr_cli.py                   # 无界面 CLI（--mode auto / --export-ruby / --ruby-map / --audit-separate / --only / --json）
+├── fa_asmr_spatial_sep.py           # 零依赖双耳立体声 ILD+IPD 空间分离工具（支持独立拆轨与体检联动）
+├── lrc_end_extend.py                # 标准字幕行尾自然延长独立工具
+├── fa_asmr/                         # 核心功能包（按职责分层组织）
+│   ├── core/                        # 基础运行与配置（np_compat.py / torch_bootstrap.py / advanced_config.py / i18n.py）
+│   ├── text/                        # 文本规范、断句与拟声门控
+│   │   ├── clause.py                # 跨模块数据契约常量 (F)、子句边界与短句顿号桥接
+│   │   ├── haruraw2norm.py          # 汉字 / 假名 / 罗马音到 MMS-FA 音素转换
+│   │   ├── inline_leak_clean.py     # 内联振假名泄露自动清洗
+│   │   ├── ono_base.py / ono_filter.py / ono_block_corpus.py  # 拟声词多阶段守门与实词保护
+│   │   └── resegment.py / merge_short.py                      # 标点重分段与短句合并
+│   ├── aligners/                    # 声学强制对齐核心算法
+│   │   ├── align.py                 # 单向对齐主引擎入口
+│   │   ├── align_model.py           # MMS-FA 加载、LoRA 注入、FP16 / INT8 推理
+│   │   ├── align_acoustic.py        # 逐帧 RMS、底噪估计与双声道 Better-Ear 融合
+│   │   ├── align_trellis.py         # 全局约束 CTC Viterbi 解码器（Numba JIT）
+│   │   ├── align_post.py / align_utils.py                     # 静音吸附、回映射与时间戳正则
+│   │   ├── multispeaker.py (+ multispeaker_*.py)              # 多人分轨 / 乱序重排 / STFT 独白遮罩引擎
+│   │   └── multiperspective.py (+ multipersp_*.py)            # 多视角联合校准与双坐标投影引擎
+│   ├── pipeline/                    # 无界面流水线编排与质检
+│   │   ├── runner.py                # 核心对齐管线总控
+│   │   ├── pairing.py / ruby.py / subtitles.py                # 编码嗅探配对、分级注音词表、LRC/SRT 生成
+│   │   └── audit.py                 # 对齐后声学体检雷达、双视角联合体检、短词跳变检测与高危切片导出
+│   └── ui/                          # Obsidian Acoustic Console 暗色控制台界面
+│       ├── console.py               # 主窗口与运行控制
+│       └── widgets.py / matrix.py   # 主题控件与多轨编排矩阵
+├── tools/compact_subs.py            # 紧凑翻译导出 / 回填 .srt+.lrc / 1:1 一致性终检脚本
+├── furigana/                        # 三层日语振假名注音引擎与异读覆盖表
+├── lora/fa_asmr_v9e10.pt            # 内置 ASMR 专用 LoRA 适配器权重
+├── tests/                           # 零依赖回归测试套件（标准库 unittest）
+└── build_in_ci.py / prepare_embedded_torch.py / _collect_stdlib.py / FA-ASMR.spec  # CPU & CUDA 双变体构建打包脚本
 ```
 
 运行零依赖回归测试（标准库 `unittest`，无需安装额外测试框架）：

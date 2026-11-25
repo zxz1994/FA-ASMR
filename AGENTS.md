@@ -9,7 +9,7 @@
 - **FA-ASMR 负责（确定性物理层）**：根据日文台本与人声音频，纯离线输出毫秒级精确对齐的 `.lrc` 与 `.srt` 原文日轴。
   - 引擎已原生内置自动编码识别（UTF-8 / UTF-8-BOM / Shift-JIS(CP932) / GB18030 / UTF-16 均可直接读取，**无需手动转码**）；
   - 已内置 `ono_filter` 拟声守门、标点重分段与短句合并，产出的日轴已完成碎句整理与孤立杂音过滤；
-  - 提供纯离线精度闭环工具：**去重注音词表导出与覆写**（`--export-ruby` / `--ruby-map`）、**对齐后声学体检雷达**（`fa_asmr_audit.py` / `--audit`）与**零依赖立体声空间分离**（`fa_asmr_spatial_sep.py` / `--audit-separate`）；
+  - 提供纯离线精度闭环工具：**去重注音词表导出与覆写**（`--export-ruby` / `--ruby-map`）、**对齐后声学体检雷达**（`fa_asmr/pipeline/audit.py` / `--audit`）与**零依赖立体声空间分离**（`fa_asmr_spatial_sep.py` / `--audit-separate`）；
   - 底层固定最优 `3000` 帧分块 + CUDA FP16 推理（峰值显存 ~3.74 GB，4 GB+ 显存即可运行）。
 - **Agent 负责（强语境语义层）**：
   1. **前置**：从官方 PDF / DOCX / TXT 提取并清洗纯发音台本（含竖排/分栏/颜色分角色 PDF 解析）、规范说话人标注与文件名配对；
@@ -72,13 +72,14 @@
 | `--mode` | 行为与适用条件 |
 | :--- | :--- |
 | `auto`（默认） | 有 `--audio-b` 或批量目录检测到双视角后缀 → `multi_persp`；台本检测到 ≥2 位角色 → `multi_speaker`；否则 → `single` |
-| `single` | 单声优、台本顺序与音频一致（`align.py`） |
-| `multi_speaker` | 多声优分轨混音、角色交错/颠倒、台词与喘息重叠（`align_multispeaker.py`） |
-| `multi_persp` | 仅用于**真正的互补清晰度双视角**，两轨联合择优对齐并分别投影导出两套独立坐标系字幕（`align_multiperspective.py`） |
+| `single` | 单声优、台本顺序与音频一致（`fa_asmr/aligners/align.py`） |
+| `multi_speaker` | 多声优分轨混音、角色交错/颠倒、台词与喘息重叠（`fa_asmr/aligners/multispeaker.py`） |
+| `multi_persp` | 仅用于**真正的互补清晰度双视角**，两轨联合择优对齐并分别投影导出两套独立坐标系字幕（`fa_asmr/aligners/multiperspective.py`） |
 
 > **⚠️ 多视角（`multi_persp`）必须由 Agent 结合剧情/台本语义判断，切勿仅凭文件名含 `視点` / `A/B` 盲开：**
 > - **适用 `multi_persp`**：两轨视角**各自都有角色说话，且不同角色或段落的清晰度在两轨之间形成互补**（例如：视角 A 中角色甲贴耳清晰、角色乙发远模糊，而视角 B 中角色乙清晰、角色甲发远；或双机位交替移动导致两轨各有一部分更清晰）。此时两轨联合择优才能显著提升整体打轴精度。
 > - **无需 `multi_persp`**：如果另一轨**仅仅是隔墙处理（闷音/低通滤波/整体远距衰减）**，不存在“另一轨反而有某段更清晰人声”的互补关系，则完全没必要跑 `multi_persp`——直接用清晰主轨跑 `single` 或 `multi_speaker` 即可（若隔墙轨也需要字幕，复用清晰主轨的对齐结果即可）。
+> - **无法读取音频时**：不支持原生音频的 Agent 无法完成上述判断，**须向用户确认**另一轨属于「互补清晰」还是「仅隔墙闷音」，并请用户指明清晰主轨；在用户答复前不得凭文件名或台本自行选定模式。
 
 #### 2. 预检与注音词表审校（推荐在对齐前先做）
 
@@ -119,16 +120,21 @@ python fa_asmr_cli.py --verify-script ./01.txt --export-ruby --json-out ./ruby_0
 > **注音覆写编写注意**：
 > - `global` 采用最长优先匹配，适合**人名与多字词**；
 > - 容易嵌在复合词里的**单汉字**（如 `中` 可能出现在 `集中`、`出` 可能出现在 `出て/出して`、`何` 可能出现在 `何度`）优先写入 `by_file -> by_line`（键为原 `.txt` 的 1-based 行号），且单汉字覆写仅在分词后作用于独立 `{单字|...}`，不会劈裂复合词；
+> - **`by_line` 绑定的是台本的物理行号**：第 4 步复核中一旦补句或删句，该行之后的行号会整体偏移，必须同步平移该轨的 `by_line` 键。词条落到错误行时**不会报错**——要么静默失效，要么把读音套到新落点行的同名单字上；
 > - `ruby_map` 同时在注音前与注音后执行权威覆写，优先级高于 `yomikata` 模型。
 
 #### 3. 执行声学对齐、声学体检与立体声空间分离联动
 
 ```bash
-# 推荐标准命令：整目录批量对齐（复用显存 + 声学体检 + 默认仅切 priority_review 高危 WAV + 多人轨自动空间分离，单人轨自动跳过拆轨）
-python fa_asmr_cli.py --batch ./作品目录 --ruby-map ./ruby_fixes.json --audit-separate --audit-out ./audit_batch.json --audit-clips-dir ./audit_clips --json
+# 推荐标准命令：整目录批量对齐（复用显存 + 声学体检 + 默认仅切 priority_review 高危纯 ASCII 中性名 WAV + 16k 单声道瘦身 + 多人轨自动空间分离）
+# 日文字幕统一输出到 ./字幕（日文），阶段 3 的 compact_subs.py 直接从该目录读取
+python fa_asmr_cli.py --batch ./作品目录 --ruby-map ./ruby_fixes.json --output-dir ./字幕（日文） --audit-separate --audit-clips-compact --audit-out ./audit_batch.json --audit-clips-dir ./audit_clips --json
 
-# 听审修完少数几轨台本后，用 --only 局部重跑（仍复用单次模型加载，避免逐轨冷启动）
-python fa_asmr_cli.py --batch ./作品目录 --only 05,07,13 --ruby-map ./ruby_fixes.json --audit-separate --audit-out ./audit_realign.json --audit-clips-dir ./audit_clips_realign --json
+# 混合目录显式配对清单模式（含单轨+双视角混放、需跳过特典差分轨如 集中Ver、或特殊分隔符命名时，用 --manifest 替代 --batch，同样支持 --dry-run / --export-ruby / --only）
+python fa_asmr_cli.py --manifest ./pairs.json --ruby-map ./ruby_fixes.json --output-dir ./字幕（日文） --audit-separate --audit-clips-compact --audit-out ./audit_batch.json --audit-clips-dir ./audit_clips --json
+
+# 仅在发生“重大结构性错位”修完台本后，才用 --only 局部重跑整轨对齐（常规小瑕疵优先走第 4 步 compact_subs.py patch 原地修轴，严禁盲目重跑整轨）
+python fa_asmr_cli.py --batch ./作品目录 --only 06 --ruby-map ./ruby_fixes.json --output-dir ./字幕（日文） --audit-separate --audit-clips-compact --audit-out ./audit_realign.json --audit-clips-dir ./audit_clips_realign --json
 
 # 单条对齐（含体检与切片）
 python fa_asmr_cli.py --audio ./01.flac --script ./01.txt --ruby-map ./ruby_fixes.json --audit-separate --audit-out ./audit_01.json --audit-clips-dir ./audit_clips --json
@@ -138,33 +144,51 @@ python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt 
 ```
 
 常用可选参数：
+- `--manifest <JSON>`：传入显式配对清单（支持 `[{script, audio, audio_b?, mode?, name?}]` 或 `{base_dir?, tasks: [...]}`），彻底解决含特典差分轨或异构命名的混合目录编排，无需手写临时 Python 脚本；
 - `--device auto|cuda|cpu`：指定推理设备（默认 `auto`）；
-- `--output-dir <目录>`：重定向字幕输出目录（默认输出到各音频同级目录）；
-- `--only <列表>`：批量模式下按逗号分隔轨号或文件名关键词筛选（如 `--only 05,07,13`），适用于局部重跑或子集注音导出；
-- `--ruby-map <JSON>`：注入外部权威注音覆写字典（支持 `--verify-script` / 单条 / `--batch`）；
+- `--line-end-extend / --extend <秒>`：字幕行尾自然延长秒数（默认 `1.2`，补偿 CTC 尾音尖峰偏短、提升 ASMR 阅读停留感；传 `0` 关闭）；
+- `--output-dir <目录>`：重定向字幕输出目录（默认输出到各音频同级目录）。**走完整工作流时请固定为 `./字幕（日文）`**：阶段 3 的 `compact_subs.py --jp-dir` 只读取单一目录下的 `.srt` / `.lrc`，而默认输出会散落在各音频旁；
+- `--only <列表>`：批量或清单模式下按逗号分隔轨号或文件名关键词筛选（如 `--only 05,07,13`，原生兼容 `トラック5` / `Track 05` 等内嵌轨号）；
+- `--ruby-map <JSON>`：注入外部权威注音覆写字典（支持 `--verify-script` / 单条 / `--batch` / `--manifest`）；
 - `--audit` / `--audit-out <JSON>`：零额外推理开销，输出声学体检报告（含顶层高危必审汇总 `priority_review`、`suspect_clauses` 与 `unaligned_speech_gaps`）；
-- `--audit-clips-dir <目录>`：合并相邻异常窗并切出原生采样率审听 WAV，默认仅切 `priority_review` 高危必审项与缺句空档（如需导出全部轻度低分 WAV 可加 `--audit-clips-all`）；
+- `--audit-clips-dir <目录>`：合并相邻异常窗并切出**纯 ASCII 中性命名**审听 WAV（如 `t02_8f31c9_suspect_01_L10_0.9s_4.3s.wav`，在 `audit.json` 的 `review_clips` 中保留 `source_stem`/`source_audio` 映射，防止原文件名敏感词触发多模态安全拦截）；默认仅切 `priority_review` 高危必审项与缺句空档（加 `--audit-clips-all` 可切全部轻度低分项）；
+- `--audit-clips-compact`：将审听切片转为 16kHz 单声道 PCM16（空间分离仍先在原生立体声上执行，确保分离精度不变），体积缩小约 80%–90%，大幅降低多模态听审开销；
 - `--audit-separate` / `--audit-sep-sources 0|2|3|4`：正向联动立体声空间分离（`0` 自动判定：**单人轨保留完整体检与原声切片，仅自动跳过空间拆轨**；多人轨按说话人数自动选 2 或 3 路）；利用人头麦双耳相干度 `MSC` + 跨声道残差 `cres` 仅对真叠声段拆出左/中/右干声 WAV（写入 `separated_wavs`）；
 - `--no-ono-gate`：临时关闭内置拟声守门（保留全部拟声词原始时间戳供 Agent 自行精修）；
 - `--json-out <文件路径>`：将结构化 JSON 摘要写入文件（适用于打包后无控制台 `console=False` 的 `FA-ASMR.exe --cli ...` 场景）。
 
-#### 4. 体检复核与日轴定稿（闭环纠错，严禁未定稿日轴即开翻）
+#### 4. 体检复核与日轴定稿（默认原地修轴，无重大错误严禁全局重跑）
 
-读取 `audit_batch.json` 后，Agent **必须先聚焦各轨顶层的 `priority_review` 列表，实际调用多模态音频读取工具（如 `read_file` 听审对应 `clip_wav` / `separated_wavs`）**完成定向复核（严禁跳过听审仅凭文本猜测）：
+> **⚠️ 严控全局重跑铁律（L1 原地修轴优先 vs L3 重大错误重跑）**：
+> - CTC + Trellis 对齐具备强局部锚点收敛性，孤立 1~2 句未录删戏、单句首尾拉伸、错别字或短句跳位**不会破坏周围正常句子的时间轴**；同理，若目录内已有质量良好的新版日轴，亦无需推倒重跑 Stage 1–2 全局对齐。
+> - **默认走 L1 原地同步修轴（覆盖 80%+ 场景，零重跑、零 `by_line` 偏移）**：使用 `python tools/compact_subs.py patch` 直接在定稿 `.srt` + `.lrc` 上原子执行删句、插句、改起止时间或替换错字（自动重排 SRT 序号、按时间排序并确定性同步重建 `.lrc`）。
+> - **仅 L3 重大结构性崩坏才允许改 `.txt` 跑 `--only` 整轨重对齐**：仅当出现**多处整块删戏/大段漏词引发跨十秒级连锁拉扯吞没**、**多人轨角色标记漏写/写反导致大面积串人**、或**高频核心词注音大面积全错导致整体滑移**时，才回退修改 `.txt`（同步平移受影响的 `by_line` 行号）并执行 `--only` 重跑。
+
+读取 `audit_batch.json` 后，Agent **必须聚焦各轨顶层的 `priority_review` 列表，并遵循「子 Agent 音频隔离」铁律**完成定向实听复核（严禁跳过听审仅凭文本猜测）：
+
+> **⚠️ 音频防上下文爆炸与极速听审铁律**：
+> - **主 Agent 严禁直接 `read_file` `.wav` 音频**（多段音频会永久驻留主会话上下文导致极速膨胀卡慢）；
+> - **快模型 + 精准背景 + 严限切片范围**：将 `priority_review` 中的 `clip_wav` 按 **每批 3–5 段** 分组派发给只读子 Agent（`research`，**默认用 `Model="flash"`**，仅对 `flash` 明确反馈叠声过重无法辨认的 1~2 段再升 `inherit` 复听），并在 Prompt 中必须做到：
+>   1. **附 1~2 句场景/角色/视角背景**（角色名、音色特征、哪个视角贴麦、是否有隔墙背景音）+ 直接透传 `priority_review` 自带的 **`context_before` / `context_after` 前后邻句上下文**，让子 Agent 带答案快速核对而非盲听猜词；
+>   2. **严限切片位置与工具边界**：明确规定子 Agent **只能 `read_file` 列表里指定的 WAV 路径**，**严禁扫目录（`listdir`/`glob`）、严禁读其他轨道/台本、严禁写 Python 跑 RMS/波形脚本**；
+>   3. **先读原声、按需补读分离轨**：首轮仅并行 `read_file` 原声 `clip_wav`（合并切片已默认限 12 秒上限），仅当原声确实被叠声盖住听不清时才补读对应的 `_K1/_K2` 分离轨，直接回传极简文字结论（是否录制、实际台词、精确起止秒数）。音频 Token 随子 Agent 结束自动释放，主上下文保持 0 音频污染。
 
 > **无原生音频模态的 Agent 降级指引（如 Claude Code / Codex / Cursor 等）**：
 > - 前置清洗、注音词表审校、对齐体检与后置翻译均不依赖音频模态，可 100% 正常执行；
-> - 到本步骤时，若当前模型/客户端不支持直接读取 `.wav` 音频，**切勿凭文本盲猜删改**——请直接把 `priority_review` 对应的少量短 WAV 路径与上下文列给用户人工听审确认（通常仅 3~8 段各 3~5 秒），或仅对这些局部切片调用本地 ASR 辅助核验后再由 Agent 执行修改与 `--only` 重跑。
+> - 到本步骤时，若当前模型/客户端不支持直接读取 `.wav` 音频，**切勿凭文本盲猜删改**——请直接把 `priority_review` 对应的少量短 WAV 路径与上下文列给用户人工听审确认（通常仅 3~8 段各 3~5 秒），或仅对这些局部切片调用本地 ASR 辅助核验后再由 Agent 执行原地修轴（或重大错位 `--only` 重跑）。
 
-1. **`unaligned_speech_gaps`（台本缺句 / 声优即兴加词）**：
-   - 直接听审 `clip_wav`（若触发分离则听 `separated_wavs`），将缺失台词补回台本；
-2. **`skipped_semantic` / `compressed` 且极低分（台本删戏未录句）**：
-   - 听审确认未录制后，从清洗台本中剔除该行（同步留意 `by_line` 行号偏移）；
-3. **`isolated_speaker_jump`（多人轨短称呼词跨区前吸错位）**：
-   - 听审确认该时间点是否仅有另一角色在说话，并核查该短句的真实落点时间，按实听时间修正日轴；
-4. **若极低分项 `ruby_terms` 含汉字**：核查是否遗漏错读并补入 `ruby_fixes.json`；
-5. **用 `--batch ... --only <变动轨号>` 一次性重跑变动轨并复核 `priority_review`**，确保**日文终轴 100% 定稿后再进入阶段 3 翻译**（避免翻完再返工）。
-6. **独立调用立体声空间分离工具（`fa_asmr_spatial_sep.py`）**：
+1. **L1 常规局部问题 → 直接 `compact_subs.py patch` 原地同步修 `.srt` + `.lrc`（免重跑）**：
+   - **错印符号/原台本笔误**：`python tools/compact_subs.py patch --srt "./字幕（日文）/05.srt" --cue 134 --replace "ｘ="`；
+   - **孤立 1~2 句未录删戏句（确认相邻句时间戳本身准确）**：`python tools/compact_subs.py patch --srt "./字幕（日文）/01.srt" --delete 114,115`；
+   - **单句起止拉伸（`internal_gap_stretch`）或短称呼跳位（`isolated_speaker_jump`）**：听审确认真实起止秒数后，`python tools/compact_subs.py patch --srt "./字幕（日文）/02.srt" --cue 65 --end 411.5`（支持浮点秒数或 `HH:MM:SS,mmm`，改时间后自动按时间重排）；
+   - **单句简短即兴加词（`unaligned_speech_gaps`）**：`python tools/compact_subs.py patch --srt "./字幕（日文）/03.srt" --start 192.4 --end 194.1 --speaker "文乃" --insert-text "はいっ……"`；
+   - 多轨多处修补也可一次性写入 `patch_ops.json`，执行 `python tools/compact_subs.py patch --sub-dir ./字幕（日文） --ops-json ./patch_ops.json`（同一轨内所有 `cue` 均按修改前原序号定位，互不干扰偏移）。
+2. **L3 重大结构性错位 → 改 `.txt` + 平移 `by_line` + `--only` 局部重跑**：
+   - 仅当多处连续删戏/漏本导致大范围连锁错位、手工修轴成本高于重跑时：修改清洗台本 `.txt`（若有漏查错读汉字一并补入 `ruby_fixes.json`）；
+   - 若该轨在 `ruby_fixes.json` 含有改动点之后的 `by_line` 词条，同步平移物理行号（第 N 行前补 1 行则 ≥N 键 +1；删第 N 行则 >N 键 −1）；
+   - 用 `--batch`（或 `--manifest`）配合 `--only <变动轨号>` 重跑该轨，若剩余少量边缘拉伸再用 `compact_subs.py patch` 收尾。
+   - 至此确保**日文终轴 100% 定稿后再进入阶段 3 翻译**（避免翻完再返工）。
+3. **独立调用立体声空间分离工具（`fa_asmr_spatial_sep.py`）**：
    - 适用于事后基于既有 `audit.json` 补做分离，或**无台本多人人头麦**直接拆声听写（零额外模型权重、原生采样率无损保高频气音）：
    ```bash
    # 事后直接读取体检报告，仅对真重叠异常段做空间分离
@@ -194,14 +218,17 @@ python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt 
    - **剧情与场景**：明确世界观、角色关系、氛围基调以及当前音轨在全剧中的剧情承接；
    - **角色人设与口吻**：锁定每位角色的性格与语域（如温柔年上、傲娇、病娇、敬语系、辣妹系、口癖与自称），以及对听众/主角的固定称呼；
    - **跨轨统一译名**：固定角色名、昵称、专有名词与关键设定词译法，确保同一作品多条音轨风格和译名始终一致；
-   - *上下文瘦身建议*：多轨长作品在日轴全部定稿后，建议在进入翻译前提示用户或执行上下文压缩（如 `/compact`），甩掉前半程的审计日志与音频历史，轻装进入翻译。
+   - **强制断点（≥ 3 轨长作品）**：在日轴全部定稿后，将《角色设定与术语卡》落盘并**提示用户执行 `/compact`**（或新开会话），甩掉前半程的体检日志与中间历史后再进入翻译阶段。
 
 #### 3.2 紧凑格式逐行语境化翻译规范
 
-1. **用紧凑格式喂给翻译、用脚本回填（省 ~35%–40% 输入 Token）**：
-   - 使用仓库自带的 `tools/compact_subs.py` 剥离 SRT 时间戳与空行（`export` 导出 `行号|说话人|原文`），每翻完 2~3 轨立即落盘 JSON 并通过 `build` 自动回填生成中文 `.srt` + `.lrc`、`verify` 终检（严格校验 1:1 行数、时间戳、说话人前缀与 0 假名残留），无需在对话中重复回显整轨译文；
+1. **用紧凑格式喂给翻译、带锚点防错回填与双视角去重（省 ~35%–55% Token）**：
+   - 使用仓库自带的 `tools/compact_subs.py` 剥离 SRT 时间戳与空行：
+     - **含双视角作品推荐加 `--dedup-pov`**：`python tools/compact_subs.py export --jp-dir ./字幕（日文） --out ./compact_jp.json --dedup-pov`，自动提取跨视角/跨轨重复台词为 `S0001|...` 共句表，仅需翻译一次即可通过 `@S0001` 自动复用到各视角，既省输出 Token 又 100% 保证跨视角同句同译；
+     - **携带 `idx|` 行号锚点回填**：翻译列表统一采用 `"1|译文"` 格式并配合 `build --require-index`（自动剥除 BOM、逐行核验序号锚点，彻底杜绝“一处合行+一处拆行”导致的隐性串行错位）；
+     - **深度终检与双语抽检**：`python tools/compact_subs.py verify --jp-dir ./字幕（日文） --cn-dir ./字幕（中文） --spot-check 3`，除校验 1:1 行数/时间戳/说话人/0 假名外，还会自动巡检日文新字体汉字与未翻汉字词残留、规范禁用拟声词、长度失衡以及跨视角同句异译，并输出均匀抽样的中日双语对照供快速终审；
 2. **直接信任并沿用定稿日轴的时间轴与分行结构**：逐行一一对应翻译，不随意合并、拆分或改写时间戳；
-3. **角色人设与听觉沉浸感优先**：贴合已查明的角色口吻与场景情绪翻出自然口语化的中文/双语字幕（避免生硬直译腔），保留原有说话人前缀（SRT 为 `【角色名】`，LRC 为 `角色名：`）与情绪符号（`♡`、`……` 等）；
+3. **角色人设与听觉沉浸感优先（严禁跨句倒装）**：贴合已查明的角色口吻与场景情绪翻出自然口语化的中文/双语字幕（避免生硬直译腔），保留原有说话人前缀（SRT 为 `【角色名】`，LRC 为 `角色名：`）与情绪符号（`♡`、`……` 等）；**严禁为了凑书面中文语序而把后句情绪核心词/谓语跨停顿倒装搬到前句**，宁可用自然口语顺承紧贴日语发声推进，确保听觉与字幕实时同步；
 4. **仅处理极少数漏网异常**：只有当某行明显属于拟声守门遗漏的纯非发音说明或异常残留时，才结合官方台本做最小化人工微调（严禁写正则脚本批量删改）。
 
 ---
@@ -211,14 +238,15 @@ python fa_asmr_cli.py --audio ./01_A.wav --audio-b ./01_B.wav --script ./01.txt 
 如果你被要求修改本仓库自身的代码，请遵守以下边界：
 
 1. **核心声学算法区默认冻结（无明确需求勿大改/大拆）**：
-   - `align.py`、`align_trellis.py`、`align_acoustic.py`、`align_multispeaker.py`、`align_multiperspective.py` 包含大量实测标定的声学阈值与 Numba JIT 边界约束；
+   - `fa_asmr/aligners/`（`align.py`、`align_trellis.py`、`align_acoustic.py`、`multispeaker*.py`、`multipersp*.py` 等）包含大量实测标定的声学阈值与 Numba JIT 边界约束；
    - 仅做最小增量修复，不要为了“代码整洁”主动重构算法核。
 2. **清晰的分层入口**：
-   - `fa_asmr_pipeline.py`：无界面核心管线（编码自动识别、注音覆写与词表提取、说话人切分、LRC/SRT 组装、`run_pipeline`、`auto_pair_files`）；
-   - `fa_asmr_cli.py`：面向脚本与 Agent 的 CLI（支持 `--mode auto`、`--dry-run`、`--verify-script`、`--export-ruby`、`--ruby-map`、`--audit` / `--audit-separate`、`--json`）；
-   - `fa_asmr_audit.py`：对齐后声学体检与双视角联合体检引擎（可疑句、未覆盖活跃语音空档、原生采样率合并切片与空间分离联动）；
-   - `fa_asmr_spatial_sep.py`：零依赖双耳立体声 ILD+IPD 空间分离工具（支持 `--start/--end`、`--auto-overlaps`、`--from-audit`）；
-   - `FA-ASMR_GUI.py` / `fa_asmr_ui.py`：桌面启动器与暗色音频控制台界面（Obsidian Acoustic Console）；
+   - **根目录外部/CI 入口（仅 7 个 `.py`）**：`FA-ASMR_GUI.py`（桌面启动器）、`fa_asmr_cli.py`（无界面 CLI）、`fa_asmr_spatial_sep.py`（独立立体声分离工具）、`lrc_end_extend.py`（字幕尾端延展工具），以及打包/构建脚本 `build_in_ci.py`、`prepare_embedded_torch.py`、`_collect_stdlib.py`；
+   - `fa_asmr/core/`：`np_compat.py`（NumPy/SciPy 兼容垫片）、`torch_bootstrap.py`（内置 PyTorch 引导）、`advanced_config.py`（进阶硬件配置）、`i18n.py`（三语词典）；
+   - `fa_asmr/text/`：`clause.py`、`ono_block_corpus.py`、`ono_base.py`、`ono_filter.py`、`resegment.py`、`merge_short.py`、`haruraw2norm.py`、`inline_leak_clean.py`；
+   - `fa_asmr/aligners/`：`align.py`、`align_model.py`、`align_acoustic.py`、`align_trellis.py`、`align_post.py`、`align_utils.py`，多人引擎（`multispeaker.py` + `multispeaker_*.py`）与双视角引擎（`multiperspective.py` + `multipersp_*.py`）；
+   - `fa_asmr/pipeline/`：`runner.py`（核心流水线总控）、`pairing.py`（编码嗅探、说话人切分、批量配对）、`ruby.py`（`AutoRuby` 单例、`ruby-map` 覆写与词表提取）、`subtitles.py`（LRC/SRT 组装与齐声合并）、`audit.py`（对齐后声学体检雷达）；
+   - `fa_asmr/ui/`：`console.py`（暗色音频控制台主界面）、`widgets.py`（主题控件）、`matrix.py`（多轨编排矩阵）；
    - 新增模块若需随 exe 打包，须同步加入 `FA-ASMR.spec` 的 `hiddenimports`。
 3. **改动前后必跑回归测试**：
    ```bash

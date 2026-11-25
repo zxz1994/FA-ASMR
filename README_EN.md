@@ -24,7 +24,7 @@ In Japanese ASMR and voice drama subtitling where official scripts are available
 * **Obsidian Acoustic Console Desktop UI (100% Standalone — No AI Agent Required)**: Dark studio console frontend featuring Windows High-DPI awareness, drag-and-drop track pairing/swapping, instant 3-mode switching, and live Chinese / Japanese / English UI hot-switching. Regular users can simply launch the app and align tracks completely offline with zero AI Agent or LLM setup.
 * **Offline Precision Audit Loop (New in `v2.5.0`)**:
   * **Single-Pass Tiered Ruby Glossary & Overrides (`--export-ruby` / `--ruby-map`)**: Loads the model once per directory to export a collocation-deduped glossary with high-risk polyphones, affix-split single kanji (e.g., `お母様`), and speaker names prioritized at the top; supports `global` and `by_file -> by_line` overrides without splitting compounds;
-  * **Post-Alignment Acoustic Audit Radar (`fa_asmr_audit.py` / `--audit`)**: Zero extra inference overhead; flags unaligned active speech gaps (missing lines / VA ad-libs), unrecorded/cut lines, and multi-speaker isolated short-word early pulls (`isolated_speaker_jump`), aggregated into `priority_review` with selective high-priority WAV clipping;
+  * **Post-Alignment Acoustic Audit Radar (`fa_asmr/pipeline/audit.py` / `--audit`)**: Zero extra inference overhead; flags unaligned active speech gaps (missing lines / VA ad-libs), unrecorded/cut lines, and multi-speaker isolated short-word early pulls (`isolated_speaker_jump`), aggregated into `priority_review` with selective high-priority WAV clipping;
   * **Zero-Dependency Binaural Spatial Separation (`fa_asmr_spatial_sep.py` / `--audit-separate`)**: Pure `numpy`/`scipy` ILD+IPD soft-masking splits genuine multi-speaker overlaps into clean L/C/R WAV stems at native sample rate (automatically skipped on single-speaker tracks; also works standalone for scriptless multi-VA recordings).
 * **Auto Encoding Detection & Low VRAM Footprint**: Automatically detects UTF-8, UTF-8-BOM, Shift-JIS (CP932), GB18030, and UTF-16 without manual transcoding; runs CUDA FP16 with a fixed optimal `3000`-frame chunk (`~3.74 GB` peak VRAM, 4 GB+ GPUs supported) and CPU INT8 dynamic quantization.
 
@@ -61,6 +61,11 @@ pip install -r requirements.txt
 
 # 4. Install yomikata without extra dev dependencies
 pip install --no-deps yomikata
+
+# 5. Download the yomikata dBert reading weights (~423 MB, required before first use)
+#    Needs plac and requests; without these weights, ruby annotation silently falls back to UniDic/pykakasi and polyphone accuracy drops
+pip install plac requests
+python -m yomikata download
 ```
 
 **Model Weights**:
@@ -69,6 +74,7 @@ pip install --no-deps yomikata
 | :--- | :--- | :--- |
 | **MMS-FA Base Model** | `models/hub/checkpoints/model.pt` | ~1.2 GB; auto-downloaded on first run or placed manually for offline use |
 | **ASMR LoRA Adapter** | `lora/fa_asmr_v9e10.pt` | **Bundled in repo** (~12.2 MB), fine-tuned for whispered Japanese ASMR |
+| **yomikata dBert Reading Weights** | `site-packages/yomikata/dbert-artifacts/` | ~423 MB, downloaded by step 5 above (`python -m yomikata download`); for offline setups, copy this folder over directly |
 
 **Launch Desktop App**: double-click `run.bat` on Windows or run `python FA-ASMR_GUI.py`.
 
@@ -145,31 +151,39 @@ python tools/compact_subs.py verify --jp-dir ./subs_jp --cn-dir ./subs_cn
 
 ```text
 FA-ASMR/
-├── AGENTS.md                   # End-to-end AI Agent operating & maintenance guide
-├── fa_asmr_cli.py              # Headless CLI (--mode auto / --export-ruby / --ruby-map / --audit-separate / --only / --json)
-├── fa_asmr_pipeline.py         # Non-GUI core pipeline, encoding detection, tiered ruby glossary, LRC/SRT & auto-pairing
-├── fa_asmr_audit.py            # Post-alignment acoustic audit, dual-POV joint audit, speaker-jump & priority WAV clipping
-├── fa_asmr_spatial_sep.py      # Zero-dependency binaural ILD+IPD spatial separator (standalone & audit-linked)
-├── tools/compact_subs.py       # Compact translation export / .srt+.lrc rebuild / 1:1 parity verifier
-├── FA-ASMR_GUI.py              # Desktop launcher, --cli router & --self-test verification
-├── fa_asmr_ui.py               # Obsidian Acoustic Console dark studio UI
-├── fa_asmr_i18n.py             # ZH / JA / EN hot-switchable localization
-├── align.py                    # Single-track acoustic alignment engine
-├── align_multispeaker.py       # Multi-speaker / reordered / STFT solo-mask engine
-├── align_multiperspective.py   # Dual-perspective joint calibration & projection engine
-├── align_trellis.py            # Global constrained CTC Viterbi decoder (Numba JIT)
-├── align_acoustic.py           # Frame RMS, noise floor & binaural Better-Ear mixture
-├── align_model.py              # MMS-FA loader, LoRA injection, FP16 / INT8 inference
-├── align_post.py               # Silence snapping, timestamp mapping & monotonicity
-├── clause.py                   # Shared data contract (F), clause boundaries & comma bridging
-├── haruraw2norm.py             # Japanese kanji/kana/romaji to MMS-FA phoneme converter
-├── inline_leak_clean.py        # Inline furigana leak cleaner
-├── ono_base.py / ono_filter.py / ono_block_corpus.py  # Multi-stage ONO gate & real-word protection
-├── resegment.py / merge_short.py / lrc_end_extend.py  # Resegmentation, short-line merge & tail extend
-├── furigana/                   # 3-tier Japanese furigana annotator & heteronym overrides
-├── lora/fa_asmr_v9e10.pt       # Bundled ASMR-specialized LoRA weights
-├── tests/                      # Zero-dependency regression suite (stdlib unittest)
-└── build_in_ci.py / FA-ASMR.spec  # GitHub Actions Windows CPU & CUDA release packaging
+├── AGENTS.md                        # End-to-end AI Agent operating & maintenance guide
+├── FA-ASMR_GUI.py                   # Desktop launcher, --cli router & --self-test verification
+├── fa_asmr_cli.py                   # Headless CLI (--mode auto / --export-ruby / --ruby-map / --audit-separate / --only / --json)
+├── fa_asmr_spatial_sep.py           # Zero-dependency binaural ILD+IPD spatial separator (standalone & audit-linked)
+├── lrc_end_extend.py                # Standalone LRC line-end natural extension utility
+├── fa_asmr/                         # Core application packages (layered by responsibility)
+│   ├── core/                        # Runtime, hardware config & i18n (np_compat.py / torch_bootstrap.py / advanced_config.py / i18n.py)
+│   ├── text/                        # Text normalization, clause rules & ONO filtering
+│   │   ├── clause.py                # Shared data contract (F), clause boundaries & comma bridging
+│   │   ├── haruraw2norm.py          # Japanese kanji/kana/romaji to MMS-FA phoneme converter
+│   │   ├── inline_leak_clean.py     # Inline furigana leak cleaner
+│   │   ├── ono_base.py / ono_filter.py / ono_block_corpus.py  # Multi-stage ONO gate & real-word protection
+│   │   └── resegment.py / merge_short.py                      # Resegmentation & short-line merge
+│   ├── aligners/                    # Acoustic forced-alignment engines
+│   │   ├── align.py                 # Single-track acoustic alignment engine
+│   │   ├── align_model.py           # MMS-FA loader, LoRA injection, FP16 / INT8 inference
+│   │   ├── align_acoustic.py        # Frame RMS, noise floor & binaural Better-Ear mixture
+│   │   ├── align_trellis.py         # Global constrained CTC Viterbi decoder (Numba JIT)
+│   │   ├── align_post.py / align_utils.py                     # Silence snapping, timestamp mapping & regex helpers
+│   │   ├── multispeaker.py (+ multispeaker_*.py)              # Multi-speaker / reordered / STFT solo-mask engine
+│   │   └── multiperspective.py (+ multipersp_*.py)            # Dual-perspective joint calibration & projection engine
+│   ├── pipeline/                    # Headless pipeline orchestration & quality audit
+│   │   ├── runner.py                # Core pipeline runner & entry orchestration
+│   │   ├── pairing.py / ruby.py / subtitles.py                # Auto-pairing, tiered ruby glossary, LRC/SRT builders
+│   │   └── audit.py                 # Post-alignment acoustic audit, dual-POV joint audit, speaker-jump & WAV clipping
+│   └── ui/                          # Obsidian Acoustic Console dark studio UI
+│       ├── console.py               # Main studio window & run controls
+│       └── widgets.py / matrix.py   # Themed widgets & multi-track task matrix
+├── tools/compact_subs.py            # Compact translation export / .srt+.lrc rebuild / 1:1 parity verifier
+├── furigana/                        # 3-tier Japanese furigana annotator & heteronym overrides
+├── lora/fa_asmr_v9e10.pt            # Bundled ASMR-specialized LoRA weights
+├── tests/                           # Zero-dependency regression suite (stdlib unittest)
+└── build_in_ci.py / prepare_embedded_torch.py / _collect_stdlib.py / FA-ASMR.spec  # Windows CPU & CUDA release packaging scripts
 ```
 
 Run the regression test suite (zero external test dependencies):

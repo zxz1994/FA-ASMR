@@ -33,7 +33,7 @@ else:
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from fa_asmr_pipeline import (
+from fa_asmr.pipeline.runner import (
     AUDIO_EXTS,
     _extract_perspective_tag,
     _iter_speaker_marks,
@@ -199,14 +199,17 @@ def _parse_only_filters(raw: Optional[str]) -> List[str]:
     return [tok.strip() for tok in re.split(r"[,，;；]+", str(raw)) if tok.strip()]
 
 
+_EMBEDDED_TRACK_NUM_RE = re.compile(r"(?:track|trk|トラック|第)\s*0*(\d{1,3})(?=\D|$)", re.IGNORECASE)
+
+
 def _matches_only_filter(name_or_path: str, filters: Sequence[str]) -> bool:
     if not filters:
         return True
-    bname = os.path.basename(name_or_path)
+    bname = os.path.basename(str(name_or_path))
     stem = os.path.splitext(bname)[0]
     bname_l = bname.lower()
     stem_l = stem.lower()
-    m_num = re.match(r"^0*(\d+)(?=[_\-\s.「【]|$)", stem)
+    m_num = re.match(r"^0*(\d+)(?=[_\-\u2017\s.「【]|$)", stem) or _EMBEDDED_TRACK_NUM_RE.search(stem)
     stem_num = int(m_num.group(1)) if m_num else None
     for tok in filters:
         tok_l = tok.lower()
@@ -218,6 +221,96 @@ def _matches_only_filter(name_or_path: str, filters: Sequence[str]) -> bool:
     return False
 
 
+def _load_manifest_tasks(
+    manifest_path: str,
+    default_mode: str = "auto",
+    output_dir: Optional[str] = None,
+) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """读取显式配对清单 JSON 并校验每个任务的路径与模式。"""
+    abs_m = os.path.abspath(manifest_path)
+    if not os.path.isfile(abs_m):
+        return [], f"配对清单文件不存在: {abs_m}"
+    try:
+        with open(abs_m, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception as e:
+        return [], f"解析配对清单 JSON 失败 ({abs_m}): {type(e).__name__}: {e}"
+
+    manifest_dir = os.path.dirname(abs_m)
+    base_dir = manifest_dir
+    if isinstance(data, list):
+        raw_items = data
+    elif isinstance(data, dict):
+        if data.get("base_dir"):
+            bd = str(data["base_dir"])
+            base_dir = os.path.abspath(bd) if os.path.isabs(bd) else os.path.abspath(os.path.join(manifest_dir, bd))
+        raw_items = data.get("tasks") if "tasks" in data else data.get("pairs")
+        if not isinstance(raw_items, list):
+            return [], "配对清单对象必须包含 'tasks'（或 'pairs'）数组"
+    else:
+        return [], "配对清单顶层必须为任务数组 [...] 或对象 {base_dir?, tasks: [...]}"
+
+    if not raw_items:
+        return [], f"配对清单不包含任何任务: {abs_m}"
+
+    def _res_path(p_val: Any) -> str:
+        s = str(p_val).strip()
+        if os.path.isabs(s):
+            return os.path.abspath(s)
+        cand_base = os.path.abspath(os.path.join(base_dir, s))
+        if os.path.exists(cand_base):
+            return cand_base
+        cand_cwd = os.path.abspath(s)
+        if os.path.exists(cand_cwd):
+            return cand_cwd
+        return cand_base
+
+    valid_modes = {"auto", "single", "multi_speaker", "multi_persp"}
+    tasks: List[Dict[str, Any]] = []
+    for idx, item in enumerate(raw_items, 1):
+        if not isinstance(item, dict):
+            return [], f"清单第 {idx} 项必须为 JSON 对象"
+        if not item.get("script") or not item.get("audio"):
+            return [], f"清单第 {idx} 项必须同时提供 'script' 与 'audio'"
+        script = _res_path(item["script"])
+        audio = _res_path(item["audio"])
+        audio_b = _res_path(item["audio_b"]) if item.get("audio_b") else None
+        for label, p in (("script", script), ("audio", audio)):
+            if not os.path.isfile(p):
+                return [], f"清单第 {idx} 项文件不存在 ({label}): {p}"
+        if audio_b:
+            if not os.path.isfile(audio_b):
+                return [], f"清单第 {idx} 项文件不存在 (audio_b): {audio_b}"
+            if os.path.normcase(audio) == os.path.normcase(audio_b):
+                return [], f"清单第 {idx} 项 audio 与 audio_b 不能指向同一文件: {audio}"
+            if output_dir:
+                ba = os.path.splitext(os.path.basename(audio))[0]
+                bb = os.path.splitext(os.path.basename(audio_b))[0]
+                if os.path.normcase(ba) == os.path.normcase(bb):
+                    return [], f"清单第 {idx} 项双视角音频基名相同 ({ba}) 且指定了 --output-dir，输出将互相覆盖"
+
+        req_m = str(item.get("mode") or default_mode).strip()
+        if req_m not in valid_modes:
+            return [], f"清单第 {idx} 项包含无效 mode='{req_m}'（可选: auto/single/multi_speaker/multi_persp）"
+        if audio_b and req_m != "multi_persp":
+            req_m = "multi_persp"
+        if req_m == "multi_persp" and not audio_b:
+            return [], f"清单第 {idx} 项指定了 multi_persp，但未提供 audio_b"
+
+        t_name = str(item.get("name") or os.path.splitext(os.path.basename(audio))[0]).strip()
+        tasks.append({
+            "id": str(item["id"]).strip() if item.get("id") is not None else "",
+            "name": t_name,
+            "requested_mode": req_m,
+            "script": script,
+            "audio": audio,
+            "audio_b": audio_b,
+            "confidence": 100,
+            "speaker_marks": [],
+        })
+    return tasks, None
+
+
 def _run_batch_export_ruby(
     batch_inputs: Sequence[str],
     recursive: bool,
@@ -225,18 +318,20 @@ def _run_batch_export_ruby(
     ruby_map: Optional[str],
     as_json: bool,
     json_out: Optional[str],
+    explicit_txt_files: Optional[Sequence[str]] = None,
 ) -> int:
-    """整目录一次加载 AutoRuby 合并导出去重注音词表（避免逐轨重复冷启动与重复审校）。"""
-    missing = [p for p in batch_inputs if not os.path.exists(p)]
-    if missing:
-        err = f"批量路径不存在: {', '.join(missing)}"
-        payload = {"ok": False, "export_ruby": True, "batch": True, "error": err}
-        if as_json:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
-        else:
-            print(f"[ERROR] {err}", file=sys.stderr)
-        _write_json_out(json_out, payload)
-        return 2
+    """整目录或清单一次加载 AutoRuby 合并导出去重注音词表（避免逐轨重复冷启动与重复审校）。"""
+    if explicit_txt_files is None:
+        missing = [p for p in batch_inputs if not os.path.exists(p)]
+        if missing:
+            err = f"批量路径不存在: {', '.join(missing)}"
+            payload = {"ok": False, "export_ruby": True, "batch": True, "error": err}
+            if as_json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"[ERROR] {err}", file=sys.stderr)
+            _write_json_out(json_out, payload)
+            return 2
 
     norm_ruby_map = None
     if ruby_map:
@@ -251,10 +346,13 @@ def _run_batch_export_ruby(
             _write_json_out(json_out, payload)
             return 2
 
-    collected, _ = _collect_batch_files(batch_inputs, recursive=recursive)
-    txt_files = [f for f in collected if os.path.splitext(f)[1].lower() == ".txt"]
-    if only_filters:
-        txt_files = [f for f in txt_files if _matches_only_filter(f, only_filters)]
+    if explicit_txt_files is not None:
+        txt_files = list(explicit_txt_files)
+    else:
+        collected, _ = _collect_batch_files(batch_inputs, recursive=recursive)
+        txt_files = [f for f in collected if os.path.splitext(f)[1].lower() == ".txt"]
+        if only_filters:
+            txt_files = [f for f in txt_files if _matches_only_filter(f, only_filters)]
     if not txt_files:
         err = "批量目录中未找到任何匹配的 .txt 台本文件"
         payload = {"ok": False, "export_ruby": True, "batch": True, "error": err, "scripts": []}
@@ -284,15 +382,15 @@ def _run_batch_export_ruby(
     if as_json:
         sys.stdout = sys.stderr
     try:
-        from fa_asmr_pipeline import AutoRuby, _ensure_runtime_ready
+        from fa_asmr.pipeline.runner import AutoRuby, _ensure_runtime_ready
         _ensure_runtime_ready()
-        from align_multispeaker import auto_normalize_speaker_headers
+        from fa_asmr.pipeline.pairing import auto_normalize_speaker_headers
 
         ruby = AutoRuby()
         ann_inst = getattr(ruby, "_ann", None)
         cleaner = None
         if ann_inst is not None and getattr(ann_inst, "_tagger", None):
-            from inline_leak_clean import InlineLeakCleaner
+            from fa_asmr.text.inline_leak_clean import InlineLeakCleaner
             cleaner = InlineLeakCleaner(ann_inst)
 
         scripts_meta: List[Dict[str, Any]] = []
@@ -446,11 +544,11 @@ def _run_verify_script(
     if as_json:
         sys.stdout = sys.stderr
     try:
-        from fa_asmr_pipeline import AutoRuby, _ensure_runtime_ready
+        from fa_asmr.pipeline.runner import AutoRuby, _ensure_runtime_ready
         _ensure_runtime_ready()
-        import clause
-        import haruraw2norm as hn
-        from align_multispeaker import auto_normalize_speaker_headers
+        import fa_asmr.text.clause as clause
+        import fa_asmr.text.haruraw2norm as hn
+        from fa_asmr.pipeline.pairing import auto_normalize_speaker_headers
 
         warnings: List[str] = []
         raw_text, detected_enc = read_text_auto_encoding(abs_path)
@@ -480,7 +578,7 @@ def _run_verify_script(
             warnings.append(f"fugashi/UniDic 未就绪 ({ann_inst.fugashi_error})，已降级为 pykakasi 逐字注音")
 
         if ann_inst is not None and getattr(ann_inst, "_tagger", None):
-            from inline_leak_clean import InlineLeakCleaner
+            from fa_asmr.text.inline_leak_clean import InlineLeakCleaner
             _cleaner = InlineLeakCleaner(ann_inst)
             body_lines = [_cleaner.clean(b) for b in body_lines]
 
@@ -617,6 +715,11 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="批量模式：传入一个或多个目录/文件路径，自动按文件名配对台本与音频",
     )
+    p.add_argument(
+        "--manifest",
+        metavar="JSON",
+        help="显式配对清单模式：传入配对 JSON（支持 [{script, audio, audio_b?, mode?, name?}] 或 {base_dir?, tasks: [...]}），适用于混合单轨/双视角/差分轨目录",
+    )
     p.add_argument("--recursive", action="store_true", help="批量模式下递归扫描子目录")
     p.add_argument(
         "--only",
@@ -647,8 +750,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--extend",
         dest="line_end_extend",
         type=float,
-        default=0.0,
-        help="字幕行尾自然延长秒数（默认 0.0，常用 0.5~1.5）",
+        default=1.2,
+        help="字幕行尾自然延长秒数（默认 1.2，传 0 关闭）",
     )
     p.add_argument("--no-silence-snap", action="store_true", help="关闭静音吸附")
     p.add_argument("--no-resegment", action="store_true", help="关闭标点驱动重分段")
@@ -688,6 +791,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="体检切片时导出全部可疑句 WAV（默认仅切出 priority_review 高危必审项与缺句空档，减少多模态听审冗余）",
     )
     p.add_argument(
+        "--audit-clips-compact",
+        action="store_true",
+        help="将体检审听切片转为 16kHz 单声道 PCM16（先在原生立体声上完成空间分离再瘦身，减少多模态听审体积与上下文开销）",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="仅做文件配对、编码嗅探与角色/模式预检，不加载模型、不执行对齐",
@@ -724,10 +832,49 @@ def _resolve_tasks(args: argparse.Namespace) -> tuple[str, List[Dict[str, Any]],
 
     has_single = bool(args.audio or args.script or args.audio_b)
     has_batch = bool(args.batch)
-    if has_single and has_batch:
-        return requested_mode, [], [], "不能同时指定 --batch 与 --audio/--script"
-    if not has_single and not has_batch:
-        return requested_mode, [], [], "请指定 --verify-script <TXT>、--audio/--script 或 --batch <目录/文件>"
+    has_manifest = bool(getattr(args, "manifest", None))
+    if sum(1 for flag in (has_single, has_batch, has_manifest) if flag) > 1:
+        return requested_mode, [], [], "不能同时指定 --manifest、--batch 与 --audio/--script"
+    if not (has_single or has_batch or has_manifest):
+        return requested_mode, [], [], "请指定 --verify-script <TXT>、--audio/--script、--batch <目录/文件> 或 --manifest <JSON>"
+
+    if has_manifest:
+        m_tasks, m_err = _load_manifest_tasks(args.manifest, default_mode=requested_mode, output_dir=args.output_dir)
+        if m_err:
+            return requested_mode, [], [], m_err
+        only_filters = _parse_only_filters(getattr(args, "only", None))
+        if only_filters:
+            m_tasks = [
+                t for t in m_tasks
+                if (t.get("id") and _matches_only_filter(t["id"], only_filters))
+                or _matches_only_filter(t["name"], only_filters)
+                or _matches_only_filter(t["script"], only_filters)
+                or _matches_only_filter(t["audio"], only_filters)
+                or (t.get("audio_b") and _matches_only_filter(t["audio_b"], only_filters))
+            ]
+            if not m_tasks:
+                return requested_mode, [], [], f"--only 过滤条件 ({args.only}) 未匹配到任何清单任务"
+        for t in m_tasks:
+            try:
+                t["mode"] = _detect_task_mode(t["requested_mode"], t["script"], t.get("audio_b"))
+            except Exception as e:
+                return requested_mode, [], [], f"读取台本失败 ({t['script']}): {type(e).__name__}: {e}"
+        seen_outputs: Dict[str, str] = {}
+        for t in m_tasks:
+            for aud_key in ("audio", "audio_b"):
+                aud_p = t.get(aud_key)
+                if not aud_p:
+                    continue
+                out_dir = os.path.abspath(args.output_dir) if args.output_dir else os.path.dirname(os.path.abspath(aud_p))
+                out_lrc = os.path.normcase(os.path.join(out_dir, os.path.splitext(os.path.basename(aud_p))[0] + ".lrc"))
+                if out_lrc in seen_outputs:
+                    return requested_mode, [], [], (
+                        f"输出字幕路径冲突: {aud_p} 与 {seen_outputs[out_lrc]} 将覆盖同一目标文件 ({out_lrc})"
+                    )
+                seen_outputs[out_lrc] = aud_p
+        uniq_modes = {t["mode"] for t in m_tasks}
+        eff_mode = next(iter(uniq_modes)) if len(uniq_modes) == 1 else "mixed"
+        return eff_mode, m_tasks, [], None
 
     if has_single:
         if not args.audio or not args.script:
@@ -826,6 +973,50 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     if args.export_ruby:
+        if args.manifest and args.batch:
+            err = "不能同时指定 --manifest 与 --batch"
+            payload = {"ok": False, "export_ruby": True, "error": err}
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"[ERROR] {err}", file=sys.stderr)
+            _write_json_out(args.json_out, payload)
+            return 2
+        if args.manifest:
+            m_tasks, m_err = _load_manifest_tasks(args.manifest, default_mode=args.mode, output_dir=args.output_dir)
+            if m_err:
+                payload = {"ok": False, "export_ruby": True, "batch": True, "error": m_err}
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    print(f"[ERROR] {m_err}", file=sys.stderr)
+                _write_json_out(args.json_out, payload)
+                return 2
+            only_f = _parse_only_filters(args.only)
+            if only_f:
+                m_tasks = [
+                    t for t in m_tasks
+                    if (t.get("id") and _matches_only_filter(t["id"], only_f))
+                    or _matches_only_filter(t["name"], only_f)
+                    or _matches_only_filter(t["script"], only_f)
+                    or _matches_only_filter(t["audio"], only_f)
+                ]
+            seen_sc = set()
+            uniq_scripts: List[str] = []
+            for t in m_tasks:
+                nc = os.path.normcase(t["script"])
+                if nc not in seen_sc:
+                    seen_sc.add(nc)
+                    uniq_scripts.append(t["script"])
+            return _run_batch_export_ruby(
+                batch_inputs=[],
+                recursive=False,
+                only_filters=[],
+                ruby_map=args.ruby_map,
+                as_json=args.json,
+                json_out=args.json_out,
+                explicit_txt_files=uniq_scripts,
+            )
         if args.batch:
             return _run_batch_export_ruby(
                 batch_inputs=args.batch,
@@ -835,7 +1026,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 as_json=args.json,
                 json_out=args.json_out,
             )
-        err = "--export-ruby 仅支持配合 --verify-script <TXT> 或 --batch <目录> 使用"
+        err = "--export-ruby 仅支持配合 --verify-script <TXT>、--batch <目录> 或 --manifest <JSON> 使用"
         payload = {"ok": False, "error": err, "mode": args.mode, "tasks": [], "unmatched": []}
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -985,6 +1176,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     audit_separate=bool(args.audit_separate),
                     audit_sep_sources=int(args.audit_sep_sources),
                     audit_clips_all=bool(args.audit_clips_all),
+                    audit_clips_compact=bool(args.audit_clips_compact),
                 )
             finally:
                 sys.stdout = orig_stdout

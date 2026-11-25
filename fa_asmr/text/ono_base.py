@@ -29,10 +29,10 @@ _COMBO = frozenset("""
     けほ げふ げぷ げほ こほん こぽ こぽっ ごく ごっくん ごぽ
     ごぽっ じゅ じゅぱ じゅぶ じゅぷ じゅぼ じゅぽ じゅる すぅ
     すうすう すふ すん ぞりゅ ちゅ ちゅぱ ちゅぴ ちゅぶ ちゅぷ
-    ちゅぼ ちゅぽ ちゅる ぢゅ ぢゅぶ ぢゅぷ ぢゅぼ ぢゅぽ ぢゅる
-    れちゅ でへ
-    にゅ にゅちゅ にゅぷ にゅぽ にゅる にゅるる ぬちゃ ぬちゅ
-    ねちゅ ねりゅ ねれ ねろ はぁ
+    ちゅぼ ちゅぽ ちゅる ぢゅ ぢゅぐ ぢゅぶ ぢゅぷ ぢゅぼ ぢゅぽ ぢゅる
+    れちゅ れぢゅ でへ
+    にゅ にゅちゅ にゅぷ にゅぽ にゅる にゅるる ぬちゃ ぬちゅ ぬりゅ
+    ねちゅ ねぢゅ ねりゅ ねれ ねろ はぁ
     はあはあ はふ はむ ひゃ ひゅ ぴちゅ ふぁ ふぃ ふぅ
     ふうふう ふぇ ふぉ ふは ふふ ふふぅ ふーふー ぶちゅ ぷちゅ ぷは べろ
     ぺちゃ ぺろ むぐ むちゅ むにゅ むふ もぐ れう
@@ -177,7 +177,7 @@ def is_ono(text: str) -> bool:
         return False
     global _BLOCK_IMPORT_WARNED
     try:
-        from ono_block_corpus import is_blocked
+        from fa_asmr.text.ono_block_corpus import is_blocked
         if is_blocked(text):
             return False
     except ImportError as e:
@@ -222,3 +222,33 @@ def is_ono(text: str) -> bool:
     if stripped != n and _seg(stripped, {}):
         return True
     return False
+
+
+# 汉字 / 英文 / 数字（含全角）
+_KANJI_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿々]")
+_LATIN_RE = re.compile(r"[A-Za-zＡ-Ｚａ-ｚ]")
+_DIGIT_RE = re.compile(r"[0-9０-９]")
+
+
+def _has_kanji(text: str) -> bool:
+    return bool(_KANJI_RE.search(text or ""))
+
+
+def is_easy_ono(surface: str) -> bool:
+    """该子句是否为【易错拟声行】—— 全项目唯一的二分判据。
+
+    只有两种：易错拟声行 / 非易错拟声行。
+    **没有命中易错拟声判定的，一律是非易错拟声行** —— 不再细分原因。
+
+    判定顺序：
+      1. 含汉字/英文/数字  -> False
+      2. 不是拟声         -> False（ono_base 内部已含黑名单：实词/动作音/喷射音…）
+      其余 -> True（易错拟声行）
+    """
+    if not surface:
+        return False
+    # 1. 汉字/英文/数字 —— 直接排除
+    if _has_kanji(surface) or _LATIN_RE.search(surface) or _DIGIT_RE.search(surface):
+        return False
+    # 2. 不是拟声（is_ono 内部已查黑名单，此处不再重复查）
+    return is_ono(surface)

@@ -132,7 +132,7 @@ class TestCli(unittest.TestCase):
 
 class TestRubyGlossaryAndOverrides(unittest.TestCase):
     def test_load_ruby_map_formats_and_errors(self):
-        from fa_asmr_pipeline import load_ruby_map
+        from fa_asmr.pipeline.runner import load_ruby_map
 
         # 扁平格式
         m1 = load_ruby_map({"陽菜羽": "ひなは", "コソ練": "こそれん"})
@@ -160,7 +160,7 @@ class TestRubyGlossaryAndOverrides(unittest.TestCase):
             load_ruby_map({"global": {}, "by_line": {"0": {"私": "あたし"}}})
 
     def test_annotate_lines_with_overrides_beats_yomikata_and_supports_by_line(self):
-        from fa_asmr_pipeline import annotate_lines_with_overrides
+        from fa_asmr.pipeline.runner import annotate_lines_with_overrides
 
         class _FakeRuby:
             # 模拟 AutoRuby：已有 {s|r} 原样保留，裸文本正常注音，并模拟 yomikata 把 {私|あたし} 改回 {私|わたし}
@@ -199,7 +199,7 @@ class TestRubyGlossaryAndOverrides(unittest.TestCase):
         self.assertGreaterEqual(hits, 3)
 
     def test_extract_ruby_glossary_sorts_polyphones_first_with_context(self):
-        from fa_asmr_pipeline import extract_ruby_glossary
+        from fa_asmr.pipeline.runner import extract_ruby_glossary
 
         annotated = [
             "{私|わたし}は{今日|きょう}、{開|ひら}くよ。",
@@ -219,7 +219,7 @@ class TestRubyGlossaryAndOverrides(unittest.TestCase):
         self.assertEqual(by_surf["今日"]["lines_by_reading"], {"きょう": [3, 9]})
 
     def test_single_kanji_override_does_not_split_compound_and_supports_by_file(self):
-        from fa_asmr_pipeline import annotate_lines_with_overrides, resolve_ruby_map_for_script
+        from fa_asmr.pipeline.runner import annotate_lines_with_overrides, resolve_ruby_map_for_script
 
         class _CompoundFakeRuby:
             def annotate(self, text: str) -> str:
@@ -260,7 +260,7 @@ class TestRubyGlossaryAndOverrides(unittest.TestCase):
         self.assertIsNone(resolved_05["by_line"].get(10))
 
     def test_extract_ruby_glossary_collocation_dedup_and_priority_tiering(self):
-        from fa_asmr_pipeline import extract_ruby_glossary, merge_ruby_glossaries
+        from fa_asmr.pipeline.runner import extract_ruby_glossary, merge_ruby_glossaries
 
         # 复现真实盲区：前两条全是「母親」，第 3 条才出现「お母様」（全部误标成 はは）；
         # 按局部搭配去重后，「お母様」必须同样保留在 examples 与 collocations 中，且标为 high(affix_split)！
@@ -308,6 +308,64 @@ class TestRubyGlossaryAndOverrides(unittest.TestCase):
                 code2 = cli.main(["--batch", td, "--only", "99", "--dry-run", "--json"])
             self.assertEqual(code2, 2)
             self.assertIn("--only", json.loads(buf_out2.getvalue())["error"])
+
+    def test_manifest_mixed_modes_and_embedded_track_only_filter(self):
+        with tempfile.TemporaryDirectory() as td:
+            # 模拟混合目录：双视角轨 T1 + 单人轨 T2（含 U+2017 双下划线）+ 需跳过的特典差分轨
+            for fn in (
+                "トラック1_挨拶_主人公視点.wav",
+                "トラック1_挨拶_夫視点.wav",
+                "トラック2\u2017単体トラック.wav",
+                "トラック1_挨拶_集中Ver.wav",
+            ):
+                open(os.path.join(td, fn), "wb").close()
+            with open(os.path.join(td, "t1.txt"), "w", encoding="utf-8") as f:
+                f.write("〖凛咲〗おはよう\n〖文乃〗おはようございます\n")
+            with open(os.path.join(td, "t2.txt"), "w", encoding="utf-8") as f:
+                f.write("やっと土日だ\n")
+
+            manifest_p = os.path.join(td, "pairs.json")
+            manifest_data = {
+                "base_dir": td,
+                "tasks": [
+                    {
+                        "name": "T1_dual",
+                        "script": "t1.txt",
+                        "audio": "トラック1_挨拶_主人公視点.wav",
+                        "audio_b": "トラック1_挨拶_夫視点.wav",
+                    },
+                    {
+                        "name": "トラック2\u2017単体トラック",
+                        "script": "t2.txt",
+                        "audio": "トラック2\u2017単体トラック.wav",
+                    },
+                ],
+            }
+            with open(manifest_p, "w", encoding="utf-8") as f:
+                json.dump(manifest_data, f, ensure_ascii=False)
+
+            buf_out, buf_err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = cli.main(["--manifest", manifest_p, "--dry-run", "--json"])
+            self.assertEqual(code, 0)
+            payload = json.loads(buf_out.getvalue())
+            self.assertEqual(payload["mode"], "mixed")
+            self.assertEqual(payload["matched_count"], 2)
+            self.assertEqual([t["mode"] for t in payload["tasks"]], ["multi_persp", "single"])
+
+            # 验证 --only 2 能识别内嵌「トラック2‗...」轨号
+            buf_only, _ = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(buf_only), contextlib.redirect_stderr(io.StringIO()):
+                code_only = cli.main(["--manifest", manifest_p, "--only", "2", "--dry-run", "--json"])
+            self.assertEqual(code_only, 0)
+            p_only = json.loads(buf_only.getvalue())
+            self.assertEqual([t["name"] for t in p_only["tasks"]], ["トラック2\u2017単体トラック"])
+
+            # 验证 --manifest 与 --batch 互斥拦截
+            buf_mut, _ = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(buf_mut), contextlib.redirect_stderr(io.StringIO()):
+                code_mut = cli.main(["--manifest", manifest_p, "--batch", td, "--dry-run", "--json"])
+            self.assertEqual(code_mut, 2)
 
 
 if __name__ == "__main__":

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-import clause
-from clause import F
-import ono_block_corpus
-from ono_filter import is_easy_ono
+import fa_asmr.text.clause as clause
+from fa_asmr.text.clause import F
+import fa_asmr.text.ono_block_corpus as ono_block_corpus
+from fa_asmr.text.ono_filter import is_easy_ono
 
 
 class TestClauseBoundaries(unittest.TestCase):
@@ -92,7 +92,7 @@ class TestOnoCorpusAndFilter(unittest.TestCase):
 
 class TestMergeShortForbiddenSpans(unittest.TestCase):
     def test_blocks_merge_across_intervening_speaker_but_allows_continuous_overlap(self):
-        import merge_short as ms
+        import fa_asmr.text.merge_short as ms
 
         # 同角色两句之间停顿 1.0s (4.0 -> 5.0)，期间他方角色发言 (4.1 -> 4.9) -> 禁止合并
         rl_gap = [
@@ -143,7 +143,7 @@ class TestUnisonSpeakerBoundaryAndBlocklist(unittest.TestCase):
             self.assertTrue(is_easy_ono(w), f"expected katakana easy-ono: {w}")
 
     def test_merge_short_does_not_merge_unison_with_single_speaker(self):
-        import merge_short as ms
+        import fa_asmr.text.merge_short as ms
 
         rl = [
             {"orig": "せーの！", "type": 3, "pron": "seeno", "start": "[00:10:00]", "end": "[00:11:00]", F.KANA_N: 3, F.SPK: ("ゆりか", "つかさ")},
@@ -155,7 +155,7 @@ class TestUnisonSpeakerBoundaryAndBlocklist(unittest.TestCase):
         self.assertEqual(sum(1 for it in merged if it.get("orig") == "\n"), 2)
 
     def test_post_process_keeps_unison_and_single_separate_in_same_stream(self):
-        import align_multispeaker as ams
+        import fa_asmr.aligners.multispeaker as ams
 
         # Stream 0 contains unison ("ゆりか", "つかさ") followed immediately (0.15s gap) by solo ("ゆりか",)
         # Stream 1 contains ("つかさ",) so post_process_and_merge_streams runs multi-stream consolidation
@@ -197,7 +197,7 @@ class TestUnisonSpeakerBoundaryAndBlocklist(unittest.TestCase):
 
     def test_merge_short_visible_chars_without_clause_head_does_not_multiply(self):
         """关闭 Ono-Gate 未运行 mark_ono_candidates（无 F.CLAUSE_HEAD）时，同子句各 token 的 F.KANA_N 绝不能按 token 数平方累加。"""
-        import merge_short as ms
+        import fa_asmr.text.merge_short as ms
 
         # 两个 5 字子句（合起来 10 字 <= max_chars=20），每个 token 都带整子句 F.KANA_N=5，且故意不设 F.CLAUSE_HEAD
         rl = [
@@ -221,9 +221,9 @@ class TestUnisonSpeakerBoundaryAndBlocklist(unittest.TestCase):
         self.assertEqual(sum(1 for it in merged if it.get("orig") == "\n"), 1)
 
     def test_buchu_is_easy_ono_and_inline_leak_preserves_suru_shi(self):
-        import ono_filter as of
+        import fa_asmr.text.ono_filter as of
         from furigana.fa_asmr_converter import RubyAnnotator
-        from inline_leak_clean import InlineLeakCleaner
+        from fa_asmr.text.inline_leak_clean import InlineLeakCleaner
 
         # 1) ぶちゅっ / ぶっちゅぅう 属于易错接吻拟声，不应进实词黑名单
         self.assertTrue(of.is_easy_ono("ぶちゅっ"))
@@ -236,6 +236,188 @@ class TestUnisonSpeakerBoundaryAndBlocklist(unittest.TestCase):
             cleaner = InlineLeakCleaner(ra)
             self.assertEqual(cleaner.clean("こうやって、お耳にご奉仕して…♡"), "こうやって、お耳にご奉仕して…♡")
             self.assertEqual(cleaner.clean("いい年して、ＪＫ制服を着た、"), "いい年して、ＪＫ制服を着た、")
+
+    def test_simultaneous_identical_text_merges_speakers_in_lrc_and_srt(self):
+        import fa_asmr.aligners.multispeaker as am
+        import fa_asmr.pipeline.runner as pipe
+
+        def _mk_line(spk, text, st, en):
+            return [
+                {"orig": text, "type": 1, "pron": "daisuki", "start": am._format_time(st), "end": am._format_time(en), F.SPK: (spk,)},
+                {"orig": "\n", "type": 0, "pron": "", F.INSERTED: True},
+            ]
+
+        # 1) 1对1同步齐声（dt=0.14s, 高度重叠）-> 合并为 【押名A、押名B】大好きです。 先輩。
+        # 2) 错开轮唱相同台词（dt=1.00s > 0.45s）-> 不合并
+        # 3) 1对多同步齐声（方案 A：保留较细分段，押名B 被切为 2 段 vs 押名A 整句）-> 输出 2 条 【押名B、押名A】
+        # 4) 同步不同台词 -> 不合并说话人
+        rl = (
+            _mk_line("押名A", "大好きです。 先輩。", 10.00, 12.80)
+            + _mk_line("押名B", "大好きです。 先輩。", 10.14, 13.00)
+            + _mk_line("押名A", "おかえり。", 20.00, 21.50)
+            + _mk_line("押名B", "おかえり。", 21.00, 22.50)
+            + _mk_line("押名B", "好きな子と、", 50.10, 51.10)
+            + _mk_line("押名A", "好きな子と、痙攣するほどの快感に、溺れましょうよ。", 50.10, 57.06)
+            + _mk_line("押名B", "痙攣するほどの快感に、溺れましょうよ。", 52.66, 57.04)
+            + _mk_line("押名A", "おはよう。", 70.00, 71.20)
+            + _mk_line("押名B", "こんにちは。", 70.10, 71.50)
+        )
+        srt_text = am.build_independent_multispeaker_srt(rl, line_end_extend=0.0)
+        # 1对1 齐声合并
+        self.assertIn("【押名A、押名B】大好きです。 先輩。", srt_text)
+        self.assertNotIn("【押名A】大好きです。", srt_text)
+        self.assertNotIn("【押名B】大好きです。", srt_text)
+        # 错开轮唱不合并
+        self.assertIn("【押名A】おかえり。", srt_text)
+        self.assertIn("【押名B】おかえり。", srt_text)
+        # 1对多 齐声按方案 A 保留较细分段，且不再保留整句冗余条
+        self.assertIn("【押名B、押名A】好きな子と、", srt_text)
+        self.assertIn("【押名B、押名A】痙攣するほどの快感に、溺れましょうよ。", srt_text)
+        self.assertNotIn("【押名A】好きな子と、痙攣するほどの快感に、溺れましょうよ。", srt_text)
+        # 文本不同不合并
+        self.assertIn("【押名A】おはよう。", srt_text)
+        self.assertIn("【押名B】こんにちは。", srt_text)
+
+        # 验证 LRC 组装层（build_standard_lrc）统一处理：
+        #   - 行内并发 1对1 齐声
+        #   - 行内并发首段 + 续行 1对多 齐声（方案 A 保留较细分段）
+        rl_lrc = [
+            # 行内并发 1对1
+            {"orig": "大好きです。 先輩。", "type": 1, "pron": "a", "start": am._format_time(10.00), "end": am._format_time(12.80), F.SPK: ("押名A",)},
+            {"orig": "大好きです。 先輩。", "type": 1, "pron": "a", "start": am._format_time(10.14), "end": am._format_time(13.00), F.SPK: ("　押名B",)},
+            {"orig": "\n", "type": 0, "pron": ""},
+            # 行内并发首段 + 续行 1对多
+            {"orig": "好きな子と、", "type": 1, "pron": "a", "start": am._format_time(50.10), "end": am._format_time(51.10), F.SPK: ("押名B",)},
+            {"orig": "好きな子と、痙攣するほどの快感に、溺れましょうよ。", "type": 1, "pron": "a", "start": am._format_time(50.10), "end": am._format_time(57.06), F.SPK: ("　押名A",)},
+            {"orig": "\n", "type": 0, "pron": ""},
+            {"orig": "痙攣するほどの快感に、溺れましょうよ。", "type": 1, "pron": "a", "start": am._format_time(52.66), "end": am._format_time(57.04), F.SPK: ("押名B",)},
+            {"orig": "\n", "type": 0, "pron": ""},
+        ]
+        lrc_text = pipe.build_standard_lrc(rl_lrc)
+        self.assertIn("[00:10.00]押名A、押名B：大好きです。 先輩。", lrc_text)
+        self.assertNotIn("　押名B：大好きです。", lrc_text)
+        self.assertIn("[00:50.10]押名B、押名A：好きな子と、", lrc_text)
+        self.assertIn("[00:52.66]押名B、押名A：痙攣するほどの快感に、溺れましょうよ。", lrc_text)
+        self.assertNotIn("　押名A：好きな子と、痙攣するほどの快感に、", lrc_text)
+
+    def test_token_level_prefix_suffix_unison_split_in_srt_and_lrc(self):
+        import fa_asmr.aligners.multispeaker as am
+        import fa_asmr.pipeline.runner as pipe
+
+        # 复现「单人引子前缀 + 带引号同步齐声后缀」：
+        #   押名B: はい。(5.10..5.50) + 「(无时) + どーぞ。先輩。(6.20..8.94) + 」(无时)
+        #   押名A: どーぞ。先輩。(6.20..8.86)
+        # 组装层应直接按逐 token 时间拆成：
+        #   1) 押名B 单人引子 はい。 (5.10 起，不越过 6.20)
+        #   2) 押名B、押名A 齐声 どーぞ。先輩。 (6.20..8.94，并优先去掉仅单侧带有的外层引号)
+        rl_srt = [
+            {"orig": "はい", "type": 1, "pron": "hai", "start": am._format_time(5.10), "end": am._format_time(5.50), F.SPK: ("押名B",)},
+            {"orig": "。", "type": 0, "pron": "", F.SPK: ("押名B",)},
+            {"orig": "「", "type": 0, "pron": "", F.SPK: ("押名B",)},
+            {"orig": "どーぞ", "type": 1, "pron": "doozo", "start": am._format_time(6.20), "end": am._format_time(7.40), F.SPK: ("押名B",)},
+            {"orig": "。", "type": 0, "pron": "", F.SPK: ("押名B",)},
+            {"orig": "先輩", "type": 1, "pron": "senpai", "start": am._format_time(7.50), "end": am._format_time(8.94), F.SPK: ("押名B",)},
+            {"orig": "。」", "type": 0, "pron": "", F.SPK: ("押名B",)},
+            {"orig": "\n", "type": 0, "pron": "", F.INSERTED: True},
+            {"orig": "どーぞ", "type": 1, "pron": "doozo", "start": am._format_time(6.20), "end": am._format_time(7.35), F.SPK: ("押名A",)},
+            {"orig": "。", "type": 0, "pron": "", F.SPK: ("押名A",)},
+            {"orig": "先輩", "type": 1, "pron": "senpai", "start": am._format_time(7.45), "end": am._format_time(8.86), F.SPK: ("押名A",)},
+            {"orig": "。", "type": 0, "pron": "", F.SPK: ("押名A",)},
+            {"orig": "\n", "type": 0, "pron": "", F.INSERTED: True},
+        ]
+        srt_text = am.build_independent_multispeaker_srt(rl_srt, line_end_extend=0.0)
+        self.assertIn("00:00:05,100 --> 00:00:06,100\n【押名B】はい。", srt_text)
+        self.assertTrue(
+            "00:00:06,200 --> 00:00:08,940\n【押名A、押名B】どーぞ。先輩。" in srt_text
+            or "00:00:06,200 --> 00:00:08,940\n【押名B、押名A】どーぞ。先輩。" in srt_text
+        )
+        self.assertNotIn("【押名A】どーぞ。先輩。", srt_text)
+
+        # 验证 LRC 行内并发拼行场景同样按逐 token 时间精准拆合并输出
+        rl_lrc = [
+            {"orig": "はい", "type": 1, "pron": "hai", "start": am._format_time(5.10), "end": am._format_time(5.50), F.SPK: ("押名B",)},
+            {"orig": "。", "type": 0, "pron": "", F.SPK: ("押名B",)},
+            {"orig": "「", "type": 0, "pron": "", F.SPK: ("押名B",)},
+            {"orig": "どーぞ", "type": 1, "pron": "doozo", "start": am._format_time(6.20), "end": am._format_time(7.40), F.SPK: ("押名B",)},
+            {"orig": "。", "type": 0, "pron": "", F.SPK: ("押名B",)},
+            {"orig": "先輩", "type": 1, "pron": "senpai", "start": am._format_time(7.50), "end": am._format_time(8.94), F.SPK: ("押名B",)},
+            {"orig": "。」", "type": 0, "pron": "", F.SPK: ("押名B",)},
+            {"orig": "どーぞ", "type": 1, "pron": "doozo", "start": am._format_time(6.20), "end": am._format_time(7.35), F.SPK: ("　押名A",)},
+            {"orig": "。", "type": 0, "pron": "", F.SPK: ("　押名A",)},
+            {"orig": "先輩", "type": 1, "pron": "senpai", "start": am._format_time(7.45), "end": am._format_time(8.86), F.SPK: ("　押名A",)},
+            {"orig": "。", "type": 0, "pron": "", F.SPK: ("　押名A",)},
+            {"orig": "\n", "type": 0, "pron": "", F.INSERTED: True},
+        ]
+        lrc_text = pipe.build_standard_lrc(rl_lrc)
+        self.assertIn("[00:05.10]押名B：はい。", lrc_text)
+        self.assertTrue(
+            "[00:06.20]押名A、押名B：どーぞ。先輩。" in lrc_text
+            or "[00:06.20]押名B、押名A：どーぞ。先輩。" in lrc_text
+        )
+        self.assertNotIn("　押名A：", lrc_text)
+
+    def test_viscous_water_ono_stems_detected(self):
+        import fa_asmr.text.ono_filter as of
+
+        for w in ("れぢゅっ", "ねぢゅりゅりゅっ", "ぢゅぐぶぶぶぶっ", "ぬりゅぅぅぅぅっ"):
+            self.assertTrue(of.is_easy_ono(w), f"Expected easy ono: {w}")
+
+    def test_multipersp_dynamic_home_order_overrides_static_pref(self):
+        from fa_asmr.aligners.multipersp_pipeline import project_result_list_to_perspective
+        import fa_asmr.aligners.multispeaker as am
+
+        # 整轨静态偏好愛蘭偏A (pref < 0)，但当前段明灯为实时主场 (_mp_home=True)、愛蘭为客场 (_mp_home=False)
+        rl = [
+            {"orig": "ありがとぉ", "type": 1, "pron": "arigatoo", "start": am._format_time(3.20), "end": am._format_time(5.30), F.SPK: ("愛蘭",), "_mp_home": False},
+            {"orig": "キモチよかったぁ", "type": 1, "pron": "kimochiyokattaa", "start": am._format_time(3.50), "end": am._format_time(6.70), F.SPK: ("　明灯",), "_mp_home": True},
+            {"orig": "\n", "type": 0, "pron": "", F.INSERTED: True},
+        ]
+        proj = project_result_list_to_perspective(
+            rl, 0.0, 100.0, perspective_side="A", spk_persp_pref={"愛蘭": -2.0, "明灯": 2.0}
+        )
+        # 实时主场明灯必须排在客场愛蘭之前
+        self.assertEqual(proj[0]["orig"], "キモチよかったぁ")
+        self.assertEqual(proj[0][F.SPK][0], "明灯")
+        self.assertEqual(proj[1]["orig"], "ありがとぉ")
+        self.assertEqual(proj[1][F.SPK][0], "　愛蘭")
+
+    def test_slow_asmr_unfinished_prefix_merges_without_intervening_speaker(self):
+        import fa_asmr.aligners.multispeaker as ams
+
+        # 明灯两句之间停顿 1.30s（慢语速喘息），前句仅 6 字且以省略号收尾、中间无别人插话 -> 应合并为 1 句
+        rl = [
+            {"orig": "それまで", "type": 3, "pron": "soremade", "start": "[00:01:00]", "end": "[00:02:00]", F.KANA_N: 4, F.SPK: ("明灯",)},
+            {"orig": "……", "type": 0, "pron": "", F.SPK: ("明灯",)},
+            {"orig": "\n", "type": 0, "pron": ""},
+            {"orig": "ガマン", "type": 3, "pron": "gaman", "start": "[00:03:30]", "end": "[00:04:10]", F.KANA_N: 3, F.SPK: ("明灯",)},
+            {"orig": "……", "type": 0, "pron": "", F.SPK: ("明灯",)},
+            {"orig": "\n", "type": 0, "pron": ""},
+            {"orig": "なるほど", "type": 3, "pron": "naruhodo", "start": "[00:10:00]", "end": "[00:11:00]", F.KANA_N: 4, F.SPK: ("愛蘭",)},
+            {"orig": "。", "type": 0, "pron": "", F.SPK: ("愛蘭",)},
+            {"orig": "\n", "type": 0, "pron": ""},
+        ]
+        ar = [
+            {"original_start": 1.00, "original_end": 2.00, "score": -0.5},
+            {"original_start": 3.30, "original_end": 4.10, "score": -0.5},
+            {"original_start": 10.00, "original_end": 11.00, "score": -0.5},
+        ]
+        tok_map = {0: 0, 1: 3, 2: 6}
+        _, indep_rl = ams.post_process_and_merge_streams(
+            result_list=rl,
+            alignment_results=ar,
+            token_to_index_map=tok_map,
+            stream_clause_lists=[[0, 1], [2]],
+            enable_ono_gate=False,
+            enable_resegment=False,
+            enable_merge_short=False,
+            merge_short_chars=20,
+            merge_short_gap=1.5,
+            merge_ono_chars=40,
+            merge_ono_gap=2.5,
+            return_independent_rl=True,
+        )
+        srt = ams.build_independent_multispeaker_srt(indep_rl, line_end_extend=0.0)
+        self.assertIn("【明灯】それまで……ガマン……", srt)
 
 
 if __name__ == "__main__":

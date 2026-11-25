@@ -17,14 +17,28 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import scipy.signal as sig
 from scipy.ndimage import uniform_filter
+
+_TRACK_NUM_RE = re.compile(r"(?:^|(?:track|trk|トラック|第)\s*0*)(\d{1,3})(?=\D|$)", re.IGNORECASE)
+
+
+def make_neutral_clip_prefix(stem: str, side: str = "A", dual_pov: bool = False) -> str:
+    """生成纯 ASCII 中性切片文件名前缀（消除敏感词触发多模态安全拦截及特殊符号转义问题）。"""
+    s = str(stem or "track")
+    m = re.match(r"^0*(\d{1,3})(?=\D|$)", s) or _TRACK_NUM_RE.search(s)
+    t_part = f"t{int(m.group(1)):02d}" if m else "trk"
+    digest = hashlib.sha1(s.encode("utf-8", errors="replace")).hexdigest()[:6]
+    side_part = f"_{side.upper()}" if dual_pov else ""
+    return f"{t_part}_{digest}{side_part}"
 
 
 def _choose_stft_params(sr: int) -> Tuple[int, int]:
@@ -376,8 +390,13 @@ def has_stereo_spatial_spread(
 def _merge_interval_items(
     items: Sequence[Dict[str, Any]],
     merge_gap_sec: float = 1.5,
+    max_window_sec: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """把时间相邻或重叠的体检条目合并为连续审听窗口，避免重复切出高度重叠的短片段。"""
+    """把时间相邻或重叠的体检条目合并为连续审听窗口，避免重复切出高度重叠的短片段。
+
+    当指定 ``max_window_sec`` 时，若合并后的窗口跨度超过上限则自动断开新开窗口，
+    防止连续多个异常点被拼成几十秒的超长切片拖慢多模态听审。
+    """
     valid = [
         it for it in items
         if it.get("start") is not None and it.get("end") is not None and float(it["end"]) > float(it["start"])
@@ -387,10 +406,12 @@ def _merge_interval_items(
     for it in valid:
         st, en = float(it["start"]), float(it["end"])
         if merged and st <= merged[-1]["end"] + float(merge_gap_sec):
-            merged[-1]["end"] = max(merged[-1]["end"], en)
-            merged[-1]["items"].append(it)
-        else:
-            merged.append({"start": st, "end": en, "items": [it]})
+            cand_end = max(merged[-1]["end"], en)
+            if max_window_sec is None or (cand_end - merged[-1]["start"]) <= float(max_window_sec):
+                merged[-1]["end"] = cand_end
+                merged[-1]["items"].append(it)
+                continue
+        merged.append({"start": st, "end": en, "items": [it]})
     return merged
 
 
@@ -531,7 +552,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         if wav_lr.shape[0] < 2:
                             raise ValueError(f"输入音频为单声道，无法进行立体声空间分离: {aud_p}")
                         is_spread, spread_info = has_stereo_spatial_spread(wav_lr[:2], sr=sr)
-                        tag = f"{stem}_{kind}{idx:02d}_{a_st:.1f}s_{a_en:.1f}s"
+                        n_pfx = make_neutral_clip_prefix(stem)
+                        tag = f"{n_pfx}_{kind}{idx:02d}_{a_st:.1f}s_{a_en:.1f}s"
                         orig_p = os.path.join(out_dir, f"{tag}_orig.wav")
                         sf.write(orig_p, wav_lr[:2].T, sr)
                         ch_files: List[Dict[str, Any]] = []
@@ -601,6 +623,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     os.makedirs(out_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(aud_abs))[0]
+    n_pfx = make_neutral_clip_prefix(stem)
 
     try:
         segments_out: List[Dict[str, Any]] = []
@@ -614,11 +637,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 s1 = min(wav_full.shape[1], int(round(en * sr)))
                 seg_lr = wav_full[:2, s0:s1]
                 sep_wavs, meta = separate_stereo_spatial(seg_lr, sr=sr, n_sources=args.sources, sigma2=args.sigma2)
-                orig_p = os.path.join(out_dir, f"{stem}_ov{idx:02d}_{st:.1f}s_{en:.1f}s_orig.wav")
+                orig_p = os.path.join(out_dir, f"{n_pfx}_ov{idx:02d}_{st:.1f}s_{en:.1f}s_orig.wav")
                 sf.write(orig_p, seg_lr.T, sr)
                 ch_files = []
                 for k, cm in enumerate(meta):
-                    ch_p = os.path.join(out_dir, f"{stem}_ov{idx:02d}_{st:.1f}s_{en:.1f}s_K{k+1}_{cm['position_tag']}.wav")
+                    ch_p = os.path.join(out_dir, f"{n_pfx}_ov{idx:02d}_{st:.1f}s_{en:.1f}s_K{k+1}_{cm['position_tag']}.wav")
                     sf.write(ch_p, sep_wavs[k], sr)
                     ch_files.append({**cm, "wav": ch_p})
                 segments_out.append({"index": idx, "start": st, "end": en, "duration": round(en - st, 2), "orig_wav": orig_p, "channels": ch_files})
@@ -632,7 +655,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             tag = f"{st:.1f}s_{en:.1f}s" if (args.start is not None or args.end is not None) else "full"
             ch_files = []
             for k, cm in enumerate(meta):
-                ch_p = os.path.join(out_dir, f"{stem}_{tag}_K{k+1}_{cm['position_tag']}.wav")
+                ch_p = os.path.join(out_dir, f"{n_pfx}_{tag}_K{k+1}_{cm['position_tag']}.wav")
                 sf.write(ch_p, sep_wavs[k], sr)
                 ch_files.append({**cm, "wav": ch_p})
             segments_out.append({"index": 1, "start": st, "end": en, "duration": round(en - st, 2), "channels": ch_files})

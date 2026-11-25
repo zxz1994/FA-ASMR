@@ -33,8 +33,8 @@ import re
 import sys
 
 # 子句概念统一到 clause.py（全项目唯一判据）
-import clause
-from clause import F
+import fa_asmr.text.clause as clause
+from fa_asmr.text.clause import F
 
 
 _FALLBACK_RE = re.compile(r"[\u3041-\u309F\u30A0-\u30FF]")
@@ -103,7 +103,7 @@ def _is_easy_ono(result_list: List[Dict[str, Any]], start: int, end: int) -> boo
     if not toks:
         return False
     try:
-        from ono_filter import is_easy_ono
+        from fa_asmr.text.ono_filter import is_easy_ono
     except ImportError as e:
         if not _ONO_IMPORT_WARNED:
             _ONO_IMPORT_WARNED = True

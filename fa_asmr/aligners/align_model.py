@@ -14,7 +14,7 @@ import sys
 import logging
 from typing import Optional, List, Dict, Any
 
-import advanced_config as adv
+import fa_asmr.core.advanced_config as adv
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +239,9 @@ def _get_model(bundle, device, lora_path=None, log_callback=None,
         # 权重由人工放到 dist/FA-ASMR/models/ (exe 同级), 不走 _internal
         _base_dir = os.path.dirname(_sys.executable)
     else:
-        _base_dir = os.path.dirname(os.path.abspath(__file__))
+        _base_dir = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
     _local_torch_home = os.path.join(_base_dir, 'models')
     if os.path.isfile(os.path.join(_local_torch_home, 'hub', 'checkpoints', 'model.pt')):
         os.environ['TORCH_HOME'] = _local_torch_home

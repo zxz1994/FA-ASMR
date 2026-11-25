@@ -81,14 +81,26 @@ binaries = []
 hiddenimports = [
     # 本项目模块（部分为运行期延迟导入，静态分析不一定收录）
     'soundfile', 'jaconv',
-    'align', 'align_acoustic', 'align_model', 'align_utils', 'align_post',
-    'align_trellis', 'haruraw2norm', 'lrc_end_extend', 'resegment',
-    'advanced_config', 'torch_bootstrap',
-    'inline_leak_clean', 'merge_short', 'ono_filter', 'ono_base', 'ono_block_corpus',
-    'clause', 'np_compat', 'fa_asmr_ui', 'fa_asmr_i18n',
-    'fa_asmr_pipeline', 'fa_asmr_cli', 'fa_asmr_audit', 'fa_asmr_spatial_sep',
+    'fa_asmr',
+    'fa_asmr.core', 'fa_asmr.core.np_compat', 'fa_asmr.core.torch_bootstrap',
+    'fa_asmr.core.advanced_config', 'fa_asmr.core.i18n',
+    'fa_asmr.text', 'fa_asmr.text.clause', 'fa_asmr.text.ono_block_corpus',
+    'fa_asmr.text.ono_base', 'fa_asmr.text.ono_filter', 'fa_asmr.text.resegment',
+    'fa_asmr.text.merge_short', 'fa_asmr.text.haruraw2norm', 'fa_asmr.text.inline_leak_clean',
+    'fa_asmr.aligners', 'fa_asmr.aligners.align', 'fa_asmr.aligners.align_model',
+    'fa_asmr.aligners.align_acoustic', 'fa_asmr.aligners.align_trellis',
+    'fa_asmr.aligners.align_post', 'fa_asmr.aligners.align_utils',
+    'fa_asmr.aligners.multispeaker',
+    'fa_asmr.aligners.multispeaker_decoder', 'fa_asmr.aligners.multispeaker_acoustic',
+    'fa_asmr.aligners.multispeaker_schedule', 'fa_asmr.aligners.multispeaker_post',
+    'fa_asmr.aligners.multiperspective',
+    'fa_asmr.aligners.multipersp_acoustic', 'fa_asmr.aligners.multipersp_segments',
+    'fa_asmr.aligners.multipersp_pipeline',
+    'fa_asmr.pipeline', 'fa_asmr.pipeline.runner', 'fa_asmr.pipeline.pairing',
+    'fa_asmr.pipeline.ruby', 'fa_asmr.pipeline.subtitles', 'fa_asmr.pipeline.audit',
+    'fa_asmr.ui', 'fa_asmr.ui.console', 'fa_asmr.ui.widgets', 'fa_asmr.ui.matrix',
+    'lrc_end_extend', 'fa_asmr_cli', 'fa_asmr_spatial_sep',
     'scipy.signal', 'scipy.ndimage',
-    'align_multispeaker', 'align_multiperspective',
 
     # ── 必须显式声明：PyInstaller 的依赖分析**漏收**这两者 ──
     # 实测（屏蔽即崩，报 "Unable to import required dependency dateutil"）：

@@ -6,8 +6,8 @@ import os
 import tempfile
 import unittest
 
-from clause import F
-import fa_asmr_pipeline as pipe
+from fa_asmr.text.clause import F
+import fa_asmr.pipeline.runner as pipe
 import lrc_end_extend as lrc_ext
 
 

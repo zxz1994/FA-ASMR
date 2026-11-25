@@ -46,58 +46,22 @@ _MAX_ONO_LINE_CHARS: int = 24    # 整行长度上限（字符）
 _LINK_GAP_SEC: float = 10.0
 
 # ── 拟声判定（用新架构）──
-from ono_base import is_ono as _is_ono_token
-from ono_block_corpus import is_blocked as _is_blocked
+from fa_asmr.text.ono_base import (
+    _DIGIT_RE,
+    _KANJI_RE,
+    _LATIN_RE,
+    _has_kanji,
+    is_easy_ono,
+    is_ono as _is_ono_token,
+)
+from fa_asmr.text.ono_block_corpus import is_blocked as _is_blocked
 # 子句概念已统一到 clause.py；本模块保留 is_clause_boundary 兼容入口。
-import clause as _clause
-from clause import F
+import fa_asmr.text.clause as _clause
+from fa_asmr.text.clause import F
 
 # 公开导出（merge_short 等外部模块用）
 is_ono_token = _is_ono_token
-
-# 汉字 / 英文 / 数字（含全角）
-_KANJI_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿々]")
-_LATIN_RE = re.compile(r"[A-Za-zＡ-Ｚａ-ｚ]")
-_DIGIT_RE = re.compile(r"[0-9０-９]")
-
-
-def _has_kanji(text: str) -> bool:
-    return bool(_KANJI_RE.search(text or ""))
-
-
-def is_clause_boundary(item: dict) -> bool:
-    """该项是否构成【子句边界】—— 含换行的完整子句视角。
-
-    实现已迁移到 clause.py（全项目统一的子句概念模块），此处保留同名函数
-    作为兼容入口：本模块及 merge_short 的多处调用都走这个名字。
-
-    语义：子句 = 换行，或「未转化为 token (无 pron) 且非注音占位符」的符号项。
-    与 FA-ASMR_GUI.py 解析阶段（line_group / alignment_tokens 的构建）同一口径。
-
-    若需要「不含换行、排除文本字」的标点切点视角，请用
-    clause.is_punct_cut_point —— 两者是同一概念的两种视角，见 clause.py 模块文档。
-    """
-    return _clause.is_clause_boundary(item)
-
-
-def is_easy_ono(surface: str) -> bool:
-    """该子句是否为【易错拟声行】—— 全项目唯一的二分判据。
-
-    只有两种：易错拟声行 / 非易错拟声行。
-    **没有命中易错拟声判定的，一律是非易错拟声行** —— 不再细分原因。
-
-    判定顺序：
-      1. 含汉字/英文/数字  -> False
-      2. 不是拟声         -> False（ono_base 内部已含黑名单：实词/动作音/喷射音…）
-      其余 -> True（易错拟声行）
-    """
-    if not surface:
-        return False
-    # 1. 汉字/英文/数字 —— 直接排除
-    if _has_kanji(surface) or _LATIN_RE.search(surface) or _DIGIT_RE.search(surface):
-        return False
-    # 2. 不是拟声（ono_base.is_ono 内部已查黑名单，此处不再重复查）
-    return _is_ono_token(surface)
+is_clause_boundary = _clause.is_clause_boundary
 
 
 

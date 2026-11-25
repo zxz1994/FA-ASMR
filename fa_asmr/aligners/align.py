@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
@@ -11,7 +12,7 @@ import numpy as np
 import torch
 import torchaudio
 
-from align_acoustic import (
+from fa_asmr.aligners.align_acoustic import (
     compute_frame_rms_triple,
     compute_track_noise_floor,
     make_silence_mask,
@@ -20,21 +21,25 @@ from align_acoustic import (
     build_next_stable_silence_end,
     FRAME_SEC,
 )
-from align_model import (
+from fa_asmr.aligners.align_model import (
     compute_emission,
     clear_model_cache,
 )
-from align_utils import (
+from fa_asmr.aligners.align_utils import (
     _canonicalize_line_tokens,
     _build_head_standalone_n_flag,
     find_subclause_ii_folds,
     _format_time,
 )
-from align_post import _post_process_tokens
-from align_trellis import ConstrainedCTCAligner
+from fa_asmr.aligners.align_post import _post_process_tokens
+from fa_asmr.aligners.align_trellis import ConstrainedCTCAligner
 logger = logging.getLogger(__name__)
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = (
+    Path(sys._MEIPASS)
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+    else Path(__file__).resolve().parents[2]
+)
 # 生产使用的 LoRA 权重。v9/E10 为 18 个候选模型中下游实测最优
 # （消融条件下 <=500ms 79.2% / MAE 0.543，四项指标综合最好）。
 # 旧基线 e30 保留为 lora/fa_asmr_e30.pt（及 .bak），可随时切回。
