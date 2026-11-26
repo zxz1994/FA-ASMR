@@ -79,6 +79,51 @@ class TestClauseBoundaries(unittest.TestCase):
 
 
 class TestOnoCorpusAndFilter(unittest.TestCase):
+    def test_blacklisted_words_keep_their_identity_when_stretched(self):
+        for word in ("まぁ", "もぉっ", "もおっ", "さぁん", "にぃい", "いぃえ",
+                     "ハァ～ィ", "おぉ～い", "イェェ～イ", "こぉれ"):
+            with self.subTest(word=word):
+                self.assertTrue(ono_block_corpus.is_blocked(word))
+                self.assertFalse(is_easy_ono(word))
+        for sound in ("はぁぁ～", "ほぉぅぅっ", "んほぉぅぅっ", "っごおっ", "きゅっ",
+                      "ちゅぅぅっ", "じゅぅぅっ", "きゅぅぅっ", "ふぅぅ", "んっ"):
+            with self.subTest(sound=sound):
+                self.assertFalse(ono_block_corpus.is_blocked(sound))
+                self.assertTrue(is_easy_ono(sound))
+
+    def test_stretched_reply_and_call_survive_the_ono_gate(self):
+        for text in ("はぁ～い", "ハァ～イ", "はあい", "はぁい～", "はぁ～いぃ", "ね～", "ねぇっ", "っ……ねぇっ……", "わ"):
+            with self.subTest(text=text):
+                self.assertFalse(is_easy_ono(text))
+        for breath in ("はぁ～", "はぁっ", "んっ", "すぅぅ", "ねりゅっ", "わっ"):
+            with self.subTest(breath=breath):
+                self.assertTrue(is_easy_ono(breath))
+
+    def test_same_spoken_calls_in_alignment_and_ono_deletion(self):
+        from fa_asmr.aligners.multipersp_acoustic import _is_pure_sfx_clause
+        from fa_asmr.pipeline.runner import _tokenize_for_alignment
+        from fa_asmr.text import haruraw2norm
+        from fa_asmr.text.ono_filter import mark_ono_candidates, decide_ono_deletions
+
+        lines = ["はぁ～い", "はぁい～", "ね～", "ねぇっ", "わ。すご。", "はぁ～", "んっ"]
+        data = _tokenize_for_alignment(haruraw2norm, "\n".join(lines), lines,
+                                       [("声",)] * len(lines), list(range(1, 8)), "ono-test")
+        self.assertEqual(data["ono_clause_flags"], [0, 0, 0, 0, 0, 0, 1, 1])
+        token_map = data["token_to_index_map"]
+        items = data["result_list"]
+        # Force an implausibly long span so a misclassified call would be marked.
+        alignment = []
+        for k, idx in token_map.items():
+            items[idx].update(start=k * 5.0, end=k * 5.0 + 4.0)
+            alignment.append(dict(original_start=k * 5.0, original_end=k * 5.0 + 4.0))
+        mark_ono_candidates(items, alignment, token_map)
+        decide_ono_deletions(items)
+        for i, (surface, tokens) in enumerate(zip(data["clause_surfaces"], data["alignment_tokens"])):
+            self.assertEqual(_is_pure_sfx_clause(surface, tokens, dict.fromkeys("haiwnesugq", 1)), i >= 6)
+        spoken = [row for row in items if row.get("pron") and not row.get(F.CLAUSE_ONO)]
+        self.assertEqual(len(spoken), sum(map(len, data["alignment_tokens"][:6])))
+        self.assertTrue(all(not row.get(F.ONO_DROPPED) for row in spoken))
+
     def test_elongated_countdown_and_real_words_blocked(self):
         for word in ("い～～ち", "に～～い", "さ～ん", "よ～ん", "ご～お", "ろ～く", "ぎゅ～～～", "おちんちんっ"):
             self.assertTrue(ono_block_corpus.is_blocked(word), f"实词应被黑名单保护: {word}")
@@ -230,12 +275,33 @@ class TestUnisonSpeakerBoundaryAndBlocklist(unittest.TestCase):
         self.assertTrue(of.is_easy_ono("ぶっちゅぅう～～～"))
         self.assertTrue(of.is_easy_ono("ぷちゅっ"))
 
-        # 2) ご奉仕して / いい年して 中的「し」是合法する动词连用形，绝不能当内联振假名泄露删掉
+        # 2) ご奉仕して / いい年して 及真实基准台本中抓出的 6 类合法实词，绝不能被误删假名
         ra = RubyAnnotator(verbose=False)
         if ra._tagger is not None:
             cleaner = InlineLeakCleaner(ra)
-            self.assertEqual(cleaner.clean("こうやって、お耳にご奉仕して…♡"), "こうやって、お耳にご奉仕して…♡")
-            self.assertEqual(cleaner.clean("いい年して、ＪＫ制服を着た、"), "いい年して、ＪＫ制服を着た、")
+            for clean_line in (
+                "こうやって、お耳にご奉仕して…♡",
+                "いい年して、ＪＫ制服を着た、",
+                "指でっ、押したりっ……擦ったりっ……",
+                "今まででっ、一番っ……ヤバいっ……",
+                "手のひらでっ、押されるのもぉっ……",
+                "行ってきますの、チューって感じじゃなくて……",
+                "美人で……清楚そうな、奥さんなのに……",
+                "乳首っ、強いいぃっ、振動っ！",
+            ):
+                with self.subTest(clean_line=clean_line):
+                    self.assertEqual(cleaner.clean(clean_line), clean_line)
+            # 3) 真实内联振假名泄露正例仍正常修复
+            for bad, good in (
+                ("沖縄きなわに行く", "沖縄に行く"),
+                ("弱点くてんを攻める", "弱点を攻める"),
+                ("気持ちちいい", "気持ちいい"),
+                ("大好ききだ", "大好きだ"),
+                ("悪るい子", "悪い子"),
+                ("次ぎはこれ", "次はこれ"),
+            ):
+                with self.subTest(leak=bad):
+                    self.assertEqual(cleaner.clean(bad), good)
 
     def test_simultaneous_identical_text_merges_speakers_in_lrc_and_srt(self):
         import fa_asmr.aligners.multispeaker as am
@@ -418,6 +484,116 @@ class TestUnisonSpeakerBoundaryAndBlocklist(unittest.TestCase):
         )
         srt = ams.build_independent_multispeaker_srt(indep_rl, line_end_extend=0.0)
         self.assertIn("【明灯】それまで……ガマン……", srt)
+
+    def test_ono_stretched_blocklist_and_real_words_not_misclassified(self):
+        import fa_asmr.text.ono_block_corpus as obc
+        import fa_asmr.text.ono_filter as of
+
+        # 1) 黑名单词根的拖长音 / 促音 / 小元音变体全部受保护，不被误判为拟声
+        for w in (
+            "いぃい", "いぃいっ", "いぃぃぃ", "もぉういい", "わぁーい", "わーーい", "わぁぁぁい",
+            "うわぁぁぁい", "おにぃぃ", "おにぃー", "おっーい",
+            "ないっ", "たいっ", "いうっ", "ほうっ", "ここっ", "ごごっ", "ふんっ",
+            "ぱんっ", "りんっ", "やんっ", "つんっ", "びゅっ", "ぴゅっ", "ずぶっ", "ずぼっ", "しこっ",
+            "さぁっー", "しぃっー", "みぃっー", "ミアっ",
+        ):
+            with self.subTest(blocked_variant=w):
+                self.assertTrue(obc.is_blocked(w), f"Expected blocked: {w}")
+                self.assertFalse(of.is_easy_ono(w), f"Expected NOT easy_ono: {w}")
+
+        # 2) 常见纯假名实词（辅音+异行元音/ん、叠字+促音/长音、前导っ/ん+实词、动词接龙）不被误判为拟声
+        for w in (
+            "ふあん", "ふおん", "におい", "しあい", "きあい", "であい", "よいん",
+            "まおう", "かおう", "せおう", "ていう", "という", "そいう", "わいん", "らいん",
+            "めいん", "むおん", "ごえん", "きおん", "まうえ", "のうえ", "ぼいん",
+            "ままー", "ままっ", "ぱぱー", "ぱぱっ", "みみっ", "みみー", "ももっ", "ちちっ", "ははっ",
+            "あがる", "あがく", "あがれ", "あふれ", "あひる", "もぐる", "あはれ",
+            "っまって", "っいたい", "っうそ", "っだれ", "っだめ", "っいく", "っいぐ",
+            "んまって", "んいたい", "んうそ", "んすごい",
+        ):
+            with self.subTest(real_word=w):
+                self.assertFalse(of.is_easy_ono(w), f"Real word misclassified as easy_ono: {w}")
+
+        # 3) 正例拟声与波浪号统一（～ U+FF5E 与 〜 U+301C）保持 100% 识别
+        for s in (
+            "は～", "は〜", "はぁ～", "はぁ〜", "はぁっ", "ほぉぅぅっ", "んほぉぅぅっ",
+            "っごおっ", "っあっ", "んあっ", "んふぅ", "んちゅ", "じゅぅぅっ", "きゅぅぅっ",
+            "じゅうっ", "じゅうう", "んじゅうぅぅ",
+            "れぢゅっ", "ねぢゅりゅりゅっ", "ぢゅぐぶぶぶぶっ", "ぬりゅぅぅぅぅっ",
+            "お“っ", "お”っ", "お“", "お”ぉ", "はぷ", "ふちゅる", "ねぶぢゅるるっ",
+            "ねぶりゅりゅっ", "すじゅ", "おごっ", "ふぶ", "うぅぅん",
+            "ぶっぽ", "ぶぽっ", "ぶぱっ", "くちゃ", "くちゃくちゃ", "がぼっ",
+            "ずずっ", "ずぞっ", "ずずぅう", "んぷ", "んれ", "ちゅぐ", "どちゅどちゅ",
+            "はひっ", "はへぇっ", "ひうっ", "ふわぁ", "ふわぁっ", "ぐおっ",
+            "おふっ", "くふ", "くふふ", "へへ", "くくっ", "ごきゅ", "ごきゅっ",
+            "ごおおっ", "んごぉっ", "ほぉぉぉぉぉぉぉっ",
+            "もぉ゛ッ", "ぬぉ゛ッ", "のぉ゛ッ", "あんっ", "あぁんっ", "ああ", "あぁ", "おぉっ",
+        ):
+            with self.subTest(true_ono=s):
+                self.assertTrue(of.is_easy_ono(s), f"True ono missed: {s}")
+
+        # 4) NAS 大规模实测抓出的高频实词/混写/截断词 Bug 防回归
+        for w in (
+            "イっ", "イ", "れ", "ふ", "げ", "んじゃ", "いいん",
+            "うん", "うんっ", "うんうん", "うーん", "うーんっ", "う～ん", "う~ん", "う〜ん", "う～～ん", "ううん", "ううんっ",
+            "ええ", "えー", "えっ", "へー", "ねっ", "おごる",
+            "あーあ", "あ～あ", "あ~あ", "あれれ", "えい", "えいっ", "あーん", "あ～ん", "あ~ん", "わぁ", "わー", "おー",
+            "んうん", "んいい", "んえっ", "っうん", "っいい",
+            "やっ", "やぁ", "やぁっ", "なっ", "なぁ", "もっ", "でっ", "まっ",
+            "てっ", "てぇ", "ってぇ", "にっ", "さっ", "きっ", "たっ", "のっ", "のぉ",
+            "しっ", "めっ", "よぉ", "よっ", "がっ", "るっ", "ろっ",
+            "じゅう", "ごお", "ご～お", "ふわふわ", "ふぐ", "ふぐっ", "ほご",
+        ):
+            with self.subTest(nas_real=w):
+                self.assertFalse(of.is_easy_ono(w), f"NAS real word misclassified as easy_ono: {w}")
+
+    def test_real_tokenization_entry_consistency_for_ono_and_interjections(self):
+        """端到端校验正式分词入口（NFKC ASCII ~、独立浊点 ゛/ﾞ/“、R5 前导ん、超长单辅音尾音与 _is_pure_sfx_clause 一致性）。"""
+        from fa_asmr.aligners.multipersp_acoustic import _is_pure_sfx_clause
+        from fa_asmr.pipeline.runner import _tokenize_for_alignment
+        from fa_asmr.text import haruraw2norm
+        from fa_asmr.text.ono_filter import mark_ono_candidates, decide_ono_deletions
+
+        protected = ["いいん", "じゅうん", "う～ん", "う〜ん", "うーんっ", "う～～ん", "あ～ん", "あ～あ", "んうん", "んいい", "んえっ", "えっ", "えっっ", "ねっっ", "うん“うん”", "のぉ”"]
+        expected_ono = ["もぉ゛ッ", "もぉ\u3099ッ", "ぬぉ゛ッ", "のぉ゛ッ", "お“っ", "ほぉぉぉぉぉぉぉっ", "ほ" + "ぉ" * 31 + "っ", "ごおおっ", "んごぉっ"]
+        lines = protected + expected_ono
+        data = _tokenize_for_alignment(
+            haruraw2norm, "\n".join(lines), lines,
+            [("声",)] * len(lines), list(range(1, len(lines) + 1)), "e2e-ono",
+        )
+        n_prot = len(protected)
+        self.assertEqual(data["ono_clause_flags"][:n_prot], [0] * n_prot,
+                         f"Protected lines flagged as ono: {list(zip(protected, data['clause_surfaces'][:n_prot], data['ono_clause_flags'][:n_prot]))}")
+        self.assertEqual(data["ono_clause_flags"][n_prot:], [1] * len(expected_ono),
+                         f"Expected ono lines missed: {list(zip(expected_ono, data['clause_surfaces'][n_prot:], data['ono_clause_flags'][n_prot:]))}")
+        # 校验顿号桥接与浊点识别口径一致：もぉ゛ッ、だめ 不得被误桥接成 1 个子句
+        bridge_data = _tokenize_for_alignment(
+            haruraw2norm, "もぉ゛ッ、だめ", ["もぉ゛ッ、だめ"],
+            [("声",)], [1], "e2e-bridge",
+        )
+        self.assertEqual(bridge_data["ono_clause_flags"], [1, 0])
+        # 校验えっ/えっっ/ねっっ/う~ん在 _is_pure_sfx_clause 中保持非 SFX
+        self.assertFalse(_is_pure_sfx_clause("えっ", ["e"], {"e": 1}))
+        self.assertFalse(_is_pure_sfx_clause("えっっ", ["e"], {"e": 1}))
+        self.assertFalse(_is_pure_sfx_clause("ねっっ", ["n", "e"], {"n": 1, "e": 2}))
+        self.assertFalse(_is_pure_sfx_clause("う~ん", ["u", "N"], {"u": 1, "N": 2}))
+        # 注入拉伸时间轴确认所有受保护行在 ono_filter 链路中绝不被删除
+        items = data["result_list"]
+        token_map = data["token_to_index_map"]
+        alignment = []
+        for k, idx in token_map.items():
+            items[idx].update(start=k * 5.0, end=k * 5.0 + 4.0)
+            alignment.append(dict(original_start=k * 5.0, original_end=k * 5.0 + 4.0))
+        mark_ono_candidates(items, alignment, token_map)
+        decide_ono_deletions(items)
+        # 统计前 n_prot 行对应发音 token，确认全部未被标为 ONO_DROPPED
+        line_idx = 0
+        for row in items:
+            if row.get("orig") == "\n":
+                line_idx += 1
+                continue
+            if line_idx < n_prot and row.get("pron"):
+                self.assertFalse(row.get(F.ONO_DROPPED), f"Protected line {lines[line_idx]} dropped!")
 
 
 if __name__ == "__main__":

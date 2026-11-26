@@ -196,7 +196,8 @@ class InlineLeakCleaner:
             lemma.split('-')[0], self.ra._kata_to_hira(lform), self._has_kanji)
         pfx, sfx, ck, cr = _extract_core(
             w.surface, self.ra._kata_to_hira(r_raw), self._has_kanji)
-        ok = (sfx > 0 and pfx == lpfx and len(ck) == len(lck) and len(cr) < len(lcr))
+        # 汉字词干必须相同（悪るい: ck=='悪'==lck），避免把异形汉字原型（如 手のひら vs lemma=掌）误判为多余送假名
+        ok = (sfx > 0 and pfx == lpfx and ck == lck and len(cr) < len(lcr))
         return ok, lcr
 
     def _readings(self, w) -> List[str]:
@@ -307,8 +308,11 @@ class InlineLeakCleaner:
                 return 'G5_HATSUON_PREFIX'
 
         # ── G6 五段動詞结尾冗余假名（次ぎは → 次は）──
+        # 仅限后续为可接名词的格助词/係助词（は/が/を/に/の 等），排除动词专属的 たり(副助詞)/て(接続助詞) 等，
+        # 避免误伤 押したりっ -> 押たりっ。
         if pos1 == '動詞' and len(w.surface) >= 2 and ctype.startswith('五段') and nxt:
-            if self._feat(nxt, 'pos1') == '助詞':
+            if (self._feat(nxt, 'pos1') == '助詞'
+                    and self._feat(nxt, 'pos2') in ('格助詞', '係助詞')):
                 stripped = w.surface[:-1]
                 for sw in self._tokenize_cached(stripped):
                     if (self._feat(sw[2], 'pos1') == '名詞'
@@ -433,7 +437,8 @@ class InlineLeakCleaner:
                     lemma = self._feat(cur_t[2], 'lemma').split('-')[0]
                     if (pos1 not in ('助詞', '動詞') and lemma != _SURU
                             and text[i] not in _PARTICLES_1
-                            and len(cur_t[2].surface) <= 2):
+                            and len(cur_t[2].surface) <= 2
+                            and not (i + 1 < len(text) and text[i + 1] in 'ゃゅょぁぃぅぇぉゎ')):
                         text = text[:i] + text[i + 1:]
                         self.stats['removed'] += 1
                         self.stats['rules']['ECHO'] = self.stats['rules'].get('ECHO', 0) + 1
@@ -540,12 +545,15 @@ class InlineLeakCleaner:
                         return cand, m
                     if m == 1 and orig_en == i:
                         if L not in _PARTICLES_1:
-                            # 合法动词「する」的活用形（如 ご奉仕して / いい年して 的 し）绝不能当作单字振假名泄露删掉
+                            # 合法动词「する」的活用形（ご奉仕して / いい年して）、助词/助动词以及多字完整 token
+                            # （如 今まで 的 まで、清楚そうな 的 そう）绝不能被腰斩删掉首字
                             next_t = next(((nst, nen, nw) for nst, nen, nw in T0 if nst == i), None)
                             if next_t is not None:
                                 n_pos1 = self._feat(next_t[2], 'pos1')
                                 n_lemma = self._feat(next_t[2], 'lemma').split('-')[0]
-                                if n_pos1 == '動詞' or n_lemma == _SURU:
+                                if (len(next_t[2].surface) > 1
+                                        or n_pos1 in ('動詞', '助詞', '助動詞')
+                                        or n_lemma == _SURU):
                                     continue
                             self.stats['rules']['SINGLE_NONPARTICLE'] = \
                                 self.stats['rules'].get('SINGLE_NONPARTICLE', 0) + 1

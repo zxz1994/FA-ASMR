@@ -29,6 +29,7 @@ except Exception as _nb_err:
 
 from fa_asmr.aligners.align_acoustic import FRAME_SEC
 from fa_asmr.aligners.align_utils import _format_time
+from fa_asmr.text.ono_block_corpus import is_spoken_interjection
 
 def _njit_cache(fn: Callable) -> Callable:
     """Use numba.njit(cache=True, nogil=True) when available; otherwise fall back cleanly to Python/NumPy."""
@@ -101,6 +102,8 @@ def _is_pure_sfx_clause(
     tok_dict: Optional[Dict[str, int]] = None,
 ) -> bool:
     """识别纯拟声/吻声/喘息短句，仅用于 Step 4 锚点隔离（绝不从主视角剔除）。"""
+    if surface and is_spoken_interjection(surface):
+        return False
     s = re.sub(r"[\s…〜～ー・、。！？!?\.,♡♥♪()（）]+", "", str(surface or ""))
     if s and re.fullmatch(
         r"(?:ちゅ|ちゅっ|ちゅぱ|ちゅる|ちゅぅ|じゅ|じゅる|じゅぼ|ずぼ|れろ|れりゅ|ねりゅ|ねぢゅ|れぢゅ|ぺろ|ぴちゃ|くちゅ|ぐちゅ|ごっくん|んちゅ|んっ|んぁ|んふ|んは|はぁ|はぅ|あぁ|ぁっ|ぁぁ|っ|あっ|ふぅ|ぅっ|くぅ|きゅ|びゅ|ぴゅ|ぷは|ぼっ|ずぶ)+[っぅぁぃぇぉー〜]*",

@@ -126,8 +126,10 @@ def mark_ono_candidates(
     # 避免决策时再按标点重新切分重判（两处口径易打架）。
     #   _clause_head = 子句首个发音 token 的下标（同一子句内所有 token 相同）
     #   _clause_ono  = 该子句是否为易错拟声子句
+    from fa_asmr.text.clause import clause_surface as _clause_surface
+
     for _cl in clauses:
-        _surface = "".join(result_list[x].get("orig", "") for x in _cl)
+        _surface = _clause_surface(result_list, _cl)
         _is_ono_cl = is_easy_ono(_surface)
         for _ri in _cl:
             result_list[_ri][F.CLAUSE_HEAD] = _cl[0]
@@ -151,7 +153,7 @@ def mark_ono_candidates(
 
         # 子句级判定：走全项目统一判据 is_easy_ono
         # （含汉字/英文/数字排除 -> 黑名单拦实词 -> 状声词保留 -> ono_base 判定）
-        surface = "".join(result_list[x].get("orig", "") for x in clause)
+        surface = _clause_surface(result_list, clause)
         if not is_easy_ono(surface):
             continue
         # 错位拟声串都很短，长子句不判

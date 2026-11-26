@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -886,24 +887,77 @@ def build_alignment_audit(
     }
 
 
-def _estimate_dt_ab(t_sec: float, side: str, sim_segs: Sequence[Dict[str, Any]], default_dt: float) -> float:
-    """估计视角 A 与 B 在时刻 t_sec 处的偏移 dt_AB = t_B - t_A。"""
-    if sim_segs:
-        best_dt = default_dt
-        best_dist = float("inf")
-        k_st = "A_st" if side == "A" else "B_st"
-        k_en = "A_en" if side == "A" else "B_en"
-        for s in sim_segs:
-            s0 = float(s.get(k_st, 0.0))
-            s1 = float(s.get(k_en, 0.0))
-            if s0 <= t_sec <= s1:
-                return float(s.get("dt_AB", default_dt))
-            d = min(abs(t_sec - s0), abs(t_sec - s1))
-            if d < best_dist:
-                best_dist = d
-                best_dt = float(s.get("dt_AB", default_dt))
-        return best_dt
-    return float(default_dt)
+def _safe_finite_float(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        num = float(val)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _peer_shift(start: float, end: float, side: str,
+                sim_segs: Optional[Sequence[Dict[str, Any]]],
+                delta_sec: Optional[float]) -> Optional[float]:
+    """Map a whole interval within one synchronized scene (bijective on both sides). dt_AB is A minus B."""
+    sign = -1.0 if side == "A" else 1.0
+    if sim_segs is None:
+        # Older callers may supply an explicit offset for a known fixed-clock pair.
+        d = _safe_finite_float(delta_sec)
+        return None if d is None else sign * d
+    peer = "B" if side == "A" else "A"
+    shifts = set()
+    for seg in sim_segs:
+        left = _safe_finite_float(seg.get(f"{side}_st"))
+        right = _safe_finite_float(seg.get(f"{side}_en"))
+        if left is None or right is None:
+            # 源侧边界本身缺失时无法判断该段是否与 [start, end] 相交，跳过继续检查其余段
+            continue
+        if end <= left or start >= right:
+            continue
+        # 仅对与源区间相交的同步段严格校验完整元数据
+        dt_v = _safe_finite_float(seg.get("dt_AB"))
+        p_left = _safe_finite_float(seg.get(f"{peer}_st"))
+        p_right = _safe_finite_float(seg.get(f"{peer}_en"))
+        if dt_v is None or p_left is None or p_right is None:
+            return None
+        shift = sign * dt_v
+        if not (left <= start and end <= right and p_left <= start + shift and end + shift <= p_right):
+            return None
+        shifts.add(shift)
+    if len(shifts) != 1:
+        return None
+    shift = shifts.pop()
+    # 目标侧双向唯一性校验：防止多个不同偏移的源段（含缺单侧边界的残缺竞争段）映射到同一对侧窗口
+    p_start, p_end = start + shift, end + shift
+    for seg in sim_segs:
+        pl = _safe_finite_float(seg.get(f"{peer}_st"))
+        pr = _safe_finite_float(seg.get(f"{peer}_en"))
+        sl = _safe_finite_float(seg.get(f"{side}_st"))
+        sr = _safe_finite_float(seg.get(f"{side}_en"))
+        dt_v = _safe_finite_float(seg.get("dt_AB"))
+        # 当目标侧仅给出一侧边界时，结合源侧区间+dt_AB推算缺失边界，防止残缺竞争段绕过多对一检查
+        eff_pl = pl if pl is not None else (sl + sign * dt_v if (sl is not None and dt_v is not None) else None)
+        eff_pr = pr if pr is not None else (sr + sign * dt_v if (sr is not None and dt_v is not None) else None)
+        if eff_pl is not None and eff_pr is not None:
+            if p_end <= eff_pl or p_start >= eff_pr:
+                continue
+        elif eff_pl is not None:
+            if p_end <= eff_pl:
+                continue
+        elif eff_pr is not None:
+            if p_start >= eff_pr:
+                continue
+        else:
+            # 既无目标侧边界也无法推算，无法确认与目标区间相交，跳过无关段
+            continue
+        if pl is None or pr is None or sl is None or sr is None or dt_v is None:
+            return None
+        other_shift = sign * dt_v
+        if other_shift != shift:
+            return None
+    return shift
 
 
 def _is_covered_on_peer(
@@ -917,16 +971,15 @@ def _is_covered_on_peer(
     p_st = g_st + shift
     p_en = g_en + shift
     dur = max(1e-6, p_en - p_st)
-    covered = 0.0
+    overlaps = []
     for m in peer_metas:
         if m["skipped"] or m["start"] is None or m["end"] is None:
             continue
-        ov = min(p_en, float(m["end"]) + margin) - max(p_st, float(m["start"]) - margin)
-        if ov > 0.0:
-            covered += ov
-            if covered >= 0.35 * dur:
-                return True
-    return False
+        start = max(p_st, float(m["start"]) - margin)
+        end = min(p_en, float(m["end"]) + margin)
+        if start < end:
+            overlaps.append((start, end))
+    return sum(end - start for start, end in _merge_intervals(overlaps)) >= 0.35 * dur
 
 
 def build_multiperspective_audit(
@@ -940,7 +993,7 @@ def build_multiperspective_audit(
     clause_annotated: Optional[Sequence[str]] = None,
     diagnostics_a: Optional[Dict[str, Any]] = None,
     diagnostics_b: Optional[Dict[str, Any]] = None,
-    delta_sec: float = 0.0,
+    delta_sec: Optional[float] = None,
     sim_segs: Optional[Sequence[Dict[str, Any]]] = None,
     low_score_threshold: float = -3.20,
 ) -> Dict[str, Any]:
@@ -992,7 +1045,6 @@ def build_multiperspective_audit(
     eff_low_thr = min(float(low_score_threshold), med_score - 1.80)
     short_low_thr = min(-4.80, eff_low_thr - 1.40)
 
-    segs = list(sim_segs or ())
     da = diagnostics_a or {}
     db = diagnostics_b or {}
     jumps_a = _detect_isolated_speaker_jumps([m for side, m in chosen if side == "A"])
@@ -1042,22 +1094,26 @@ def build_multiperspective_audit(
     )
 
     gaps: List[Dict[str, Any]] = []
-    kept_a_bcoords: List[Tuple[float, float]] = []
+    kept_a_bcoords: List[Tuple[float, float, float]] = []
     for g in raw_gaps_a:
-        dt = _estimate_dt_ab(0.5 * (g["start"] + g["end"]), "A", segs, delta_sec)
-        if _is_covered_on_peer(g["start"], g["end"], metas_b, shift=dt):
+        shift = _peer_shift(g["start"], g["end"], "A", sim_segs, delta_sec)
+        if shift is not None and _is_covered_on_peer(g["start"], g["end"], metas_b, shift):
             continue
         ga = dict(g)
         ga["perspective"] = "A"
         gaps.append(ga)
-        kept_a_bcoords.append((g["start"] + dt, g["end"] + dt))
+        if shift is not None:
+            kept_a_bcoords.append((g["start"] + shift, g["end"] + shift, shift))
 
     for g in raw_gaps_b:
-        dt = _estimate_dt_ab(0.5 * (g["start"] + g["end"]), "B", segs, delta_sec)
-        if _is_covered_on_peer(g["start"], g["end"], metas_a, shift=-dt):
+        shift = _peer_shift(g["start"], g["end"], "B", sim_segs, delta_sec)
+        if shift is not None and _is_covered_on_peer(g["start"], g["end"], metas_a, shift):
             continue
         # 避免与视角 A 已报的同一处缺失语音重复报警
-        if any(min(g["end"], be) - max(g["start"], bs) > 0.35 * max(0.1, g["duration"]) for bs, be in kept_a_bcoords):
+        if shift is not None and any(
+            shift == -a_shift and min(g["end"], be) - max(g["start"], bs) > 0.35 * max(0.1, g["duration"])
+            for bs, be, a_shift in kept_a_bcoords
+        ):
             continue
         gb = dict(g)
         gb["perspective"] = "B"

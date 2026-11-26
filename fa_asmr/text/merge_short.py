@@ -95,11 +95,14 @@ def _is_easy_ono(result_list: List[Dict[str, Any]], start: int, end: int) -> boo
     否则机制静默失效、极难察觉。
     """
     global _ONO_IMPORT_WARNED
+    from fa_asmr.text.clause import is_voicing_mark as _is_voicing_mark, ono_token_surface as _ono_token_surface
     toks = []
     for i in range(start, end):
         it = result_list[i]
         if it.get("pron") and it.get("orig"):
-            toks.append(it.get("orig", ""))
+            toks.append(_ono_token_surface(it))
+        elif toks and _is_voicing_mark(it):
+            toks.append("゛")
     if not toks:
         return False
     try:

@@ -139,17 +139,43 @@ def is_prolong_mark(item: Dict[str, Any]) -> bool:
     return bool(orig) and bool(_PROLONG_ONLY_RE.match(orig))
 
 
-_VOICING_MARKS = frozenset("゛゜\u309b\u309c\u3099\u309a")
+_VOICING_MARKS = frozenset("゛゜ﾞﾟ\u309b\u309c\u3099\u309a")
+_STANDALONE_DAKUTEN_CHARS = frozenset("゛ﾞ\u309b\u3099")
 
 
 def is_voicing_mark(item: Dict[str, Any]) -> bool:
-    """该项是否为由独立浊音符（゛/゜）归一化后映射来的词内浊点符号。"""
+    """该项是否为由独立浊音符（゛/゜/ﾞ/ﾟ）归一化后映射来的词内浊点符号。"""
     src = item.get(F.SRC)
     if src is not None:
         s = src.strip()
         return bool(s) and all(c in _VOICING_MARKS for c in s)
     orig = item.get("orig", "") or ""
     return bool(orig) and all(c in _VOICING_MARKS for c in orig)
+
+
+def ono_token_surface(item: Dict[str, Any]) -> str:
+    """取供拟声判定使用的 token 表面串。
+
+    正常返回 ``orig``；若 ``orig`` 在注音规范化阶段剥除了独立浊点（例如
+    ``_src='もぉ゛ッ'`` -> ``orig='もぉッ'``），且 ``_src`` 为纯假名+浊点/延长记号，
+    则保留 ``_src`` 以便下游 ``ono_base`` 正确识别独立浊点喘息。
+    """
+    orig = item.get("orig", "") or ""
+    src = item.get(F.SRC)
+    if (
+        isinstance(src, str)
+        and src
+        and any(c in _STANDALONE_DAKUTEN_CHARS for c in src)
+        and not any(c in _STANDALONE_DAKUTEN_CHARS for c in orig)
+        and all(
+            ("\u3041" <= c <= "\u309F")
+            or ("\u30A0" <= c <= "\u30FF")
+            or c in "ー～〜~゛゜ﾞﾟ\u309b\u309c\u3099\u309a"
+            for c in src
+        )
+    ):
+        return src
+    return orig
 
 
 def src_text(item: Dict[str, Any]) -> str:
@@ -292,7 +318,7 @@ def mark_short_comma_bridges(
     for k in range(len(raw_segs) - 1):
         c1, p_idxs, saw_nl = raw_segs[k]
         c2, _, _ = raw_segs[k + 1]
-        s1_raw = "".join(result_list[x].get("orig", "") for x in c1)
+        s1_raw = clause_surface(result_list, c1)
         p1_raw = "".join(str(result_list[x].get("pron", "")) for x in c1)
         if not acc_surf:
             acc_surf = s1_raw
@@ -314,7 +340,7 @@ def mark_short_comma_bridges(
             acc_surf = ""
             continue
 
-        s2 = "".join(result_list[x].get("orig", "") for x in c2)
+        s2 = clause_surface(result_list, c2)
         p2 = "".join(str(result_list[x].get("pron", "")) for x in c2)
         ono2 = bool(_is_easy_ono(s2))
         comb_surf = acc_surf + s2
@@ -370,8 +396,19 @@ def split_clauses(
 
 def clause_surface(result_list: Sequence[Dict[str, Any]],
                    clause: Sequence[int]) -> str:
-    """取出一个子句的可见文本（拼 orig）。"""
-    return "".join(result_list[i].get("orig", "") for i in clause)
+    """取出一个子句的可见文本（拼 orig，并保留词内独立浊点供拟声判定）。"""
+    if not clause:
+        return ""
+    cl_set = set(clause)
+    parts: List[str] = []
+    lo, hi = clause[0], clause[-1]
+    for i in range(lo, hi + 1):
+        it = result_list[i]
+        if i in cl_set:
+            parts.append(ono_token_surface(it))
+        elif parts and is_voicing_mark(it):
+            parts.append("゛")
+    return "".join(parts)
 
 
 def clauses_with_surface(

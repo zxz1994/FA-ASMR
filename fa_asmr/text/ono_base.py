@@ -24,22 +24,22 @@ _SINGLE = frozenset("""
 # ══ ② 词干 ══
 _COMBO = frozenset("""
     あが あぐ あっく あは あひ あへ あふ あむ うぐ うふ
-    うぷ うぷぷ うへ うほ えへ おへ おほ きゃ きゃは ぎゃ
-    きゅ くす くちゅ くぷ くぽ くん ぐちゃ ぐちゅ ぐぷ ぐっぽ ぐぼ ぐぽ
-    けほ げふ げぷ げほ こほん こぽ こぽっ ごく ごっくん ごぽ
+    うぷ うぷぷ うへ うほ えへ おご おふ おへ おほ がぼ きゃ きゃは ぎゃ
+    きゅ くく くす くちゃ くちゅ くふ くぷ くぽ くん ぐお ぐちゃ ぐちゅ ぐぷ ぐっぽ ぐぼ ぐぽ
+    けほ げふ げぷ げほ こほん こぽ こぽっ ごきゅ ごく ごっくん ごぽ
     ごぽっ じゅ じゅぱ じゅぶ じゅぷ じゅぼ じゅぽ じゅる すぅ
-    すうすう すふ すん ぞりゅ ちゅ ちゅぱ ちゅぴ ちゅぶ ちゅぷ
+    すうすう すじゅ すふ すん ずず ずぞ ぞりゅ ちゅ ちゅぐ ちゅぱ ちゅぴ ちゅぶ ちゅぷ
     ちゅぼ ちゅぽ ちゅる ぢゅ ぢゅぐ ぢゅぶ ぢゅぷ ぢゅぼ ぢゅぽ ぢゅる
-    れちゅ れぢゅ でへ
+    どちゅ れちゅ れぢゅ でへ
     にゅ にゅちゅ にゅぷ にゅぽ にゅる にゅるる ぬちゃ ぬちゅ ぬりゅ
-    ねちゅ ねぢゅ ねりゅ ねれ ねろ はぁ
-    はあはあ はふ はむ ひゃ ひゅ ぴちゅ ふぁ ふぃ ふぅ
-    ふうふう ふぇ ふぉ ふは ふふ ふふぅ ふーふー ぶちゅ ぷちゅ ぷは べろ
-    ぺちゃ ぺろ むぐ むちゅ むにゅ むふ もぐ れう
+    ねちゅ ねぢゅ ねぶ ねりゅ ねれ ねろ はぁ
+    はあはあ はひ はふ はぷ はへ はむ ひう ひゃ ひゅ ぴちゅ ふぁ ふぃ ふぅ
+    ふうふう ふぇ ふぉ ふちゅ ふは ふぶ ふふ ふふぅ ふーふー ふわぁ ぶちゅ ぶぱ ぶぽ ぶっぽ ぷちゅ ぷは べろ
+    へへ ぺちゃ ぺろ むぐ むちゅ むにゅ むふ もぐ れう
     れぅ れぇ れぇろ れら れり れりゅ れる れれ れろ
     れろぉ んき んぎ んく んぐ んじ んじゅ んちゅ んぢ
-    んは んば んぱ んび んぴ んふ んぶ んべ んほ
-    んみ んむ んり んれろ ゲ ゲェ
+    んは んば んぱ んび んぴ んふ んぶ んぷ んべ んほ
+    んみ んむ んり んれ んれろ ゲェ
 """.split())
 
 # 片假名对称
@@ -53,34 +53,57 @@ _COMBO = _COMBO | frozenset(
 # ══ ③ 变换 ══
 _VEQ = {"ぁ": "あ", "ぃ": "い", "ぅ": "う", "ぇ": "え", "ぉ": "お"}
 _SMALL = frozenset("ぁぃぅぇぉ")
-_TRANSPARENT = frozenset("っッー～〜~゛゜ﾞﾟ")
-_TAIL_EXT = frozenset("っッー～〜~゛ﾞ゜ﾟんンあいうえおぁぃぅぇぉァィゥェォ")
+_TRANSPARENT = frozenset("っッー～〜~゛゜ﾞﾟ\u3099\u309a")
+_TAIL_EXT = frozenset("っッー～〜~゛ﾞ゜ﾟ\u3099\u309aんンあいうえおぁぃぅぇぉァィゥェォ")
 # 续接音节仅在口腔词干之后使用，不参与独立起手匹配。
 _MOUTH_TAIL = tuple(sorted(
     set("むろるれぷぽぶぼぱこくふあいうえおんゃゅょ")
     | {c + v for c in "ぎぢびぴみり" for v in "ゃゅょ"},
     key=len, reverse=True,
 ))
-# 有清晰词形的吞咽/清嗓音及尖叫，只接记号、元音或完整词干。
+# 有清晰词形的吞咽/清嗓音、尖叫及易构成实词的2字词干，只接记号、元音或完整词干，不开启口腔音自由续接。
 _CLOSED_STEMS = frozenset("""
-    ごく ごっくん ごぽ ごぽっ こぽ こぽっ こほん
-    けほ げふ げぷ げほ ゲ ゲェ ぎゃ
+    ごきゅ ごく ごっくん ごぽ ごぽっ こぽ こぽっ こほん
+    けほ げふ げぷ げほ ゲェ ぎゃ
+    あが あぐ あは あひ あふ あむ おご おふ がぼ くく くす くふ くん ぐお
+    すふ すん はひ はへ はむ ひう ふわぁ へへ もぐ んじ
 """.split())
 _CONS = frozenset(
     "かきくけこがぎぐげごさしすせそざじずぜぞたちつてとだぢづでど"
     "なにぬねのはひふへほばびぶべぼぱぴぷぺぽまみむめもやゆよらりるれろわ")
+# 普通单辅音+促音/延长/小元音仅限真实气息/呻吟/喉音辅音，
+# 避免把 やっ/もっ/まっ/てっ/でっ/なっ/なぁ/にっ/さっ/めっ/よぉ/のぉ/てぇ 等实词截断与助词拖音误判为拟声；
+# 若串内含独立浊点 ゛/ﾞ（如 もぉ゛ッ / ぬぉ゛ッ / のぉ゛ッ），仍允许全量 _CONS 匹配。
+_BREATH_CONS = frozenset("はひふへほばびぶべぼぱぴぷぺぽくぐすずむげごれわ")
 _VOW = frozenset("あいうえおぁぃぅぇぉ")
+_CONS_VOWEL = {kana: vowel for vowel, row in (
+    ("あ", "あかがさざただなはばぱまやゃらわ"),
+    ("い", "いきぎしじちぢにひびぴみり"),
+    ("う", "うくぐすずつづぬふぶぷむゆゅるゔ"),
+    ("え", "えけげせぜてでねへべぺめれ"),
+    ("お", "おこごそぞとどのほぼぽもよょろを"),
+) for kana in row}
+_PURE_MARKS = frozenset("っー～〜~゛゜ﾞﾟ\u3099\u309a")
 
 # 音节形状本身不证明实际发声方式；续接只由已识别的口腔词干开启。
 
-_KANA_RE = re.compile(r"^[\u3041-\u309F\u30A0-\u30FFー～゛ﾞ゜ﾟ]+$")
+_KANA_RE = re.compile(r"^[\u3041-\u309F\u30A0-\u30FFー～〜~゛ﾞ゜ﾟ\u3099\u309a]+$")
 
 # 黑名单不可用时的降级告警只打一次（见 is_ono）
 _BLOCK_IMPORT_WARNED = False
 
 
+# 同人台本常用弯引号 “ / ” 紧跟假名后替代低沉浊点 ゛（如 お“っ / お”っ / お“ぉ）
+_PSEUDO_DAKUTEN_RE = re.compile(r"(?<=[\u3041-\u309F\u30A0-\u30FF])[“”]")
+
+
+def _normalize_pseudo_dakuten(s: str) -> str:
+    return _PSEUDO_DAKUTEN_RE.sub("゛", s) if ("“" in s or "”" in s) else s
+
+
 def _norm(s: str) -> str:
     """R1 片假名→平假名 → R2 小写→大写（词尾小写保留作尾记号）→ R4 重复压缩。"""
+    s = _normalize_pseudo_dakuten(s)
     t = "".join(_K2H.get(c, c) for c in s)
     out = []
     for i, c in enumerate(t):
@@ -99,12 +122,14 @@ def _strip_marks(s: str) -> str:
     return "".join(c for c in s if c not in _TRANSPARENT)
 
 
-_COMBO_NORM = frozenset(_norm(w) for w in _COMBO)
-_COMBO_UNMARKED = frozenset(_strip_marks(_norm(w)) for w in _COMBO)
+# 剔除经重复压缩后缩成单字的伪词干（如 れれ→れ、ふふ→ふ），防止裸单字 れ/ふ 误判为拟声
+_COMBO_NORM = frozenset(nw for w in _COMBO for nw in (_norm(w),) if len(nw) >= 2)
+_COMBO_UNMARKED = frozenset(uw for w in _COMBO for uw in (_strip_marks(_norm(w)),) if len(uw) >= 2)
 
 
 def _segment_form(s: str) -> str:
     """统一字形并去透明记号，但保留词干音节数，避免把ふふ缩成裸ふ。"""
+    s = _normalize_pseudo_dakuten(s)
     hira = "".join(_K2H.get(c, c) for c in s)
     return "".join(_VEQ.get(c, c) for c in _strip_marks(hira))
 
@@ -114,24 +139,37 @@ _CLOSED_STEMS = frozenset(_segment_form(w) for w in _CLOSED_STEMS)
 
 
 def _is_cons_tail(s: str) -> bool:
-    """呼气/呻吟的最简形式。
+    """呼气/呻吟的最简形式（不做叠字压缩，避免把 ままー/ぱぱっ/みみっ 误压成单辅音）。
 
     长度 2：
-      ① 元音重复       ああ いい うう ええ おお
-      ② 辅音 + 促音/长音  はっ ふっ はー ふー
-      —— 不含「辅音 + 元音」（ここ / もう / いい 是实词，不收）
-    长度 3~4：
-      单辅音 + 纯延长记号（はっぁ / ふーっ / くぅぅ / ほぉぉ）
+      ① 元音重复       ああ うう おお（いい/ええ 是实词，不收）
+      ② 辅音 + 促音/长音/波浪/小写元音  はっ ふー くぅ ほぉ わっ
+      —— 不含「辅音 + 大写元音」（ここ / もう / いい 是实词，不收）
+    长度 >= 3：
+      单辅音 + 纯延长记号 / 小写元音 / 本行元音（はぁぁ～ / ふぅぅ / ほぉぅぅっ / ごおっ / ほぉぉぉぉぉぉぉっ），
+      严禁接异行大写元音或裸「ん」（避免误杀 ふあん / におい / しあい / ていう / まおう / わいん）。
+      总长度上限统一由 is_ono 顶层（<= 60）管控，不在本函数设额外长度断层。
     """
-    if not s or len(s) > 4:
+    if not s:
         return False
-    if len(s) == 2:
+    h = "".join(_K2H.get(c, c) for c in s)
+    has_standalone_dakuten = any(c in "゛ﾞ\u3099" for c in h)
+    valid_cons = _CONS if has_standalone_dakuten else _BREATH_CONS
+    if len(h) == 2:
         # 元音重复（ああ うう おお）—— 但 いい/ええ 是实词
-        if s[0] in "あうお" and s[0] == s[1]:
+        if h[0] in "あうお" and h[0] == h[1]:
             return True
-        # 辅音 + 促音/长音/波浪/小写元音（はっ ふー くぅ ほぉ）
-        return s[0] in _CONS and s[1] in "っッー～ぁぃぅぇぉ"
-    return s[0] in _CONS and all(c in _TAIL_EXT for c in s[1:])
+        # 气息辅音 + 促音/长音/波浪/小写元音（はっ ふー くぅ ほぉ わっ）
+        return h[0] in valid_cons and h[1] in "っー～〜~ぁぃぅぇぉ"
+    if h[0] not in valid_cons:
+        return False
+    v0 = _CONS_VOWEL.get(h[0], "")
+    # 允许纯延长/促音/浊点、小写元音（ほぉぅぅっ）、以及首辅音的本行大写元音（ごおっ / はあぁ）
+    allowed = _PURE_MARKS | _SMALL | ({v0} if v0 else set())
+    if not all(c in allowed for c in h[1:]):
+        return False
+    # 至少包含 1 个延长/促音/小写元音特征（防止纯大写元音串如 はああ 以外的异常），本行重复元音 >=2 也可
+    return any(c in _PURE_MARKS or c in _SMALL for c in h[1:]) or (v0 and h[1:].count(v0) >= 2)
 
 
 def _seg(s: str, memo: dict) -> bool:
@@ -176,9 +214,10 @@ def is_ono(text: str) -> bool:
     if not text or len(text) > 60:
         return False
     global _BLOCK_IMPORT_WARNED
+    is_blocked_fn = None
     try:
-        from fa_asmr.text.ono_block_corpus import is_blocked
-        if is_blocked(text):
+        from fa_asmr.text.ono_block_corpus import is_blocked as is_blocked_fn
+        if is_blocked_fn(text):
             return False
     except ImportError as e:
         # 黑名单不可用时跳过检查 —— 实词会被误判为拟声，进而可能被当呻吟删掉。
@@ -191,27 +230,39 @@ def is_ono(text: str) -> bool:
                 file=sys.stderr,
             )
 
-    # 先判 cons_tail（归一会把 くぅ 变成 くう，丢失小写信息）
+    # 先判 cons_tail（直接基于原串，不做叠字压缩，保留小写元音并避免 ままー/みみっ 误杀）
+    text = _normalize_pseudo_dakuten(text)
     if _is_cons_tail(text):
         return True
+    hira_raw = "".join(_K2H.get(c, c) for c in text)
     n = _norm(text)
-    # R5 ん 不能起首日语词
-    # 但 ん+动作音拗音（んしょ/んきゅ/んちゅ）是动作音，不收；
-    # ん+其他拗音（んぢぁ/んじぇ/んびぉ）是呻吟，收。
+    # R5 ん 起首 / R6 促音起首：剥离前导喘息后验证剩余内容，严禁一刀切秒杀 っまって / っだめ / んいたい / んうそ 等实词；
+    # 若剩余部分本身命中黑名单（如 んうん / んいい / んえっ / っうん / っいい），直接拦截，防止落入 _seg 被拆成单字放行。
     _ACTION_GLIDE = frozenset("しきち")
-    if (n.startswith("ん") and _KANA_RE.match(n)
-            and not (len(n) > 1 and n[1] in _ACTION_GLIDE)):
-        return True
-    # R6 促音不能起首
-    if n[:1] == "っ":
-        return True
+    if hira_raw.startswith("ん") and _KANA_RE.match(hira_raw):
+        if len(n) > 1 and n[1] in _ACTION_GLIDE:
+            pass
+        else:
+            rest = hira_raw.lstrip("んっー～〜~゛゜ﾞﾟ")
+            if not rest:
+                return True
+            if is_blocked_fn is not None and is_blocked_fn(rest):
+                return False
+            if _is_cons_tail(rest) or (rest != hira_raw and is_ono(rest)):
+                return True
+    if hira_raw.startswith("っ") and _KANA_RE.match(hira_raw):
+        rest = hira_raw.lstrip("っー～〜~゛゜ﾞﾟ")
+        if not rest:
+            return True
+        if is_blocked_fn is not None and is_blocked_fn(rest):
+            return False
+        if _is_cons_tail(rest) or (rest != hira_raw and is_ono(rest)):
+            return True
     # R7 纯元音 + 记号 —— あ/う/お 开头，长度 ≥ 2（'い' 单字不算）
     if (len(n) >= 2 and n[0] in "あうお"
-            and all(c in _VOW or c in _TRANSPARENT or c == "～" for c in n)):
+            and all(c in _VOW or c in _TRANSPARENT for c in n)):
         return True
     if n in _COMBO_NORM or _strip_marks(n) in _COMBO_UNMARKED:
-        return True
-    if _is_cons_tail(n):
         return True
     if _seg(text, {}):
         return True

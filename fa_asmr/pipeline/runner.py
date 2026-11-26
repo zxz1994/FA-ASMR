@@ -267,7 +267,12 @@ def _tokenize_for_alignment(
     flat_idx = 0
     src_idx = 0
 
-    from fa_asmr.text.clause import is_clause_boundary as _is_clause_boundary, mark_short_comma_bridges as _mark_comma_bridges
+    from fa_asmr.text.clause import (
+        is_clause_boundary as _is_clause_boundary,
+        is_voicing_mark as _is_voicing_mark,
+        mark_short_comma_bridges as _mark_comma_bridges,
+        ono_token_surface as _ono_token_surface,
+    )
     from fa_asmr.text.ono_base import is_easy_ono as _ieo
 
     _mark_comma_bridges(result_list)
@@ -291,9 +296,11 @@ def _tokenize_for_alignment(
             if not current_line:
                 cur_clause_spk = tuple(item.get(F.SPK, ())) if item.get(F.SPK) else ()
             current_line.append(pron)
-            cur_ono_surface.append(orig)
+            cur_ono_surface.append(_ono_token_surface(item))
             token_to_index_map[flat_idx] = i
             flat_idx += 1
+        elif current_line and _is_voicing_mark(item):
+            cur_ono_surface.append("゛")
     if current_line:
         alignment_tokens.append(current_line)
         line_group.append(src_idx)

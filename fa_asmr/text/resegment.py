@@ -88,6 +88,7 @@ def _is_ono_span(result_list, start_idx: int, end_idx: int = None) -> bool:
     给定 end_idx 时扫到该下标。
     空子句（无发音 token）返回 False。
     """
+    from fa_asmr.text.clause import is_voicing_mark as _is_voicing_mark, ono_token_surface as _ono_token_surface
     toks = []
     j = start_idx
     while j < len(result_list):
@@ -100,7 +101,9 @@ def _is_ono_span(result_list, start_idx: int, end_idx: int = None) -> bool:
         if end_idx is None and _is_cut_candidate(it):
             break
         if it.get("pron") and orig:
-            toks.append(orig)
+            toks.append(_ono_token_surface(it))
+        elif toks and _is_voicing_mark(it):
+            toks.append("゛")
         j += 1
     if not toks:
         return False
